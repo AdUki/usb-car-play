@@ -1,0 +1,25 @@
+[Unit]
+Description=btdisk: the USB stick that plays the phone's Bluetooth audio
+Documentation=https://github.com/AdUki/usb-car-play
+# Started as early as systemd can: the radio enumerates the stick while the rest boots, and
+# Bluetooth joins when bluetoothd is up (btdisk waits for it on D-Bus).
+DefaultDependencies=no
+After=sys-kernel-config.mount
+Wants=sys-kernel-config.mount
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=simple
+ExecStartPre=/usr/libexec/btdisk/btdisk-gadget setup
+ExecStart=/usr/bin/btdisk -c /etc/btdisk.conf
+ExecStopPost=/usr/libexec/btdisk/btdisk-gadget teardown
+Restart=always
+RestartSec=1
+# The USB and A2DP paths must not wait behind anything else on the single core; the A2DP reader
+# thread raises itself to SCHED_FIFO.
+Nice=-10
+LimitRTPRIO=50
+
+[Install]
+WantedBy=sysinit.target

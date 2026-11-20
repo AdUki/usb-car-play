@@ -1,0 +1,6 @@
+# boot (firmware, kernel), root (read-only), data (the pairings; the only writable partition)
+part /boot --source bootimg-partition --ondisk mmcblk0 --fstype=vfat --label boot --active --align 4096 --size 48
+part /     --source rootfs            --ondisk mmcblk0 --fstype=ext4 --label root --align 4096
+part /data                            --ondisk mmcblk0 --fstype=ext4 --label data --align 4096 --size 16
+
+bootloader --ptable msdos

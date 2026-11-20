@@ -1,0 +1,64 @@
+#!/bin/sh
+# btdisk-gadget setup|teardown — the USB gadget btdisk serves: one configuration, one
+# FunctionFS function. btdisk writes the function's descriptors and binds the UDC itself, so
+# this only builds the configfs tree and mounts FunctionFS. Settings come from the environment
+# (systemd's EnvironmentFile=/etc/default/btdisk-gadget), with flash-drive-like defaults.
+set -e
+# mount(8) would take a file called "btdisk" in the current directory (the daemon's binary, when
+# run from its build dir) for the FunctionFS instance name and expand it to a path.
+cd /
+
+G=/sys/kernel/config/usb_gadget/${BTDISK_GADGET:-btdisk}
+FFS=${BTDISK_FFS:-/dev/ffs-btdisk}
+VID=${BTDISK_VID:-0x1d6b}          # Linux Foundation
+PID=${BTDISK_PID:-0x0104}          # Multifunction Composite Gadget
+MANUFACTURER=${BTDISK_MANUFACTURER:-Generic}
+PRODUCT=${BTDISK_PRODUCT:-USB Flash Disk}
+SERIAL=${BTDISK_SERIAL:-$(sed -n 's/^Serial[[:space:]]*: *//p' /proc/cpuinfo | tail -c 13)}
+SERIAL=${SERIAL:-B7D15C000001}
+MAXPOWER=${BTDISK_MAXPOWER_MA:-250}
+
+setup() {
+    modprobe libcomposite 2>/dev/null || true
+    modprobe usb_f_fs 2>/dev/null || true
+    mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config
+    if [ ! -d "$G" ]; then
+        mkdir "$G"
+        echo "$VID" > "$G/idVendor"
+        echo "$PID" > "$G/idProduct"
+        echo 0x0100 > "$G/bcdDevice"
+        echo 0x0200 > "$G/bcdUSB"
+        mkdir "$G/strings/0x409"
+        echo "$MANUFACTURER" > "$G/strings/0x409/manufacturer"
+        echo "$PRODUCT" > "$G/strings/0x409/product"
+        echo "$SERIAL" > "$G/strings/0x409/serialnumber"
+        mkdir "$G/configs/c.1"
+        echo "$MAXPOWER" > "$G/configs/c.1/MaxPower"
+        mkdir "$G/configs/c.1/strings/0x409"
+        echo "Mass Storage" > "$G/configs/c.1/strings/0x409/configuration"
+        mkdir "$G/functions/ffs.btdisk"
+        ln -s "$G/functions/ffs.btdisk" "$G/configs/c.1/"
+    fi
+    mkdir -p "$FFS"
+    i=0
+    until mountpoint -q "$FFS" || mount -t functionfs btdisk "$FFS" 2>/dev/null; do
+        i=$((i + 1))
+        [ $i -lt 50 ] || { echo "cannot mount FunctionFS at $FFS" >&2; exit 1; }
+        sleep 0.1
+    done
+}
+
+teardown() {
+    [ -d "$G" ] || return 0
+    [ -n "$(cat "$G/UDC" 2>/dev/null)" ] && echo "" > "$G/UDC" || true
+    mountpoint -q "$FFS" && umount "$FFS" || true
+    rm -f "$G/configs/c.1/ffs.btdisk"
+    rmdir "$G/configs/c.1/strings/0x409" "$G/configs/c.1" "$G/functions/ffs.btdisk" \
+          "$G/strings/0x409" "$G" 2>/dev/null || true
+}
+
+case "$1" in
+    setup) setup ;;
+    teardown) teardown ;;
+    *) echo "usage: $0 setup|teardown" >&2; exit 2 ;;
+esac

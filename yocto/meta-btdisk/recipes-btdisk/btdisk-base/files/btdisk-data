@@ -1,0 +1,17 @@
+#!/bin/sh
+# The one writable place: /data (the SD card's third partition) keeps the Bluetooth pairings, so
+# the phone reconnects after the car was switched off. Everything else is read-only or in RAM, so
+# cutting the power at any moment is safe. The journal makes /data survive that too; a journal
+# that cannot be replayed is checked and repaired before mounting.
+DEV=/dev/mmcblk0p3
+mkdir -p /data
+if ! mountpoint -q /data; then
+    mount -t ext4 -o noatime,data=journal,commit=1 "$DEV" /data 2>/dev/null || {
+        e2fsck -p "$DEV" >/dev/null 2>&1
+        mount -t ext4 -o noatime,data=journal,commit=1 "$DEV" /data
+    } || { echo "btdisk-data: no /data, pairings will not survive a power off" >&2; exit 0; }
+fi
+mkdir -p /data/bluetooth
+chmod 0700 /data/bluetooth
+mkdir -p /var/lib/bluetooth 2>/dev/null
+mount --bind /data/bluetooth /var/lib/bluetooth

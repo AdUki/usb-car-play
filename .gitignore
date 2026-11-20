@@ -1,0 +1,11 @@
+app/build/
+app/build-*/
+app/compile_commands.json
+.bench/
+yocto/layers/
+yocto/build-*/
+yocto/sdk/
+yocto/downloads/
+yocto/sstate-cache/
+yocto/conf/site.conf
+app/.cache/
