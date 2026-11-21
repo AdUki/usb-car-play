@@ -1,0 +1,215 @@
+From 4f7ea79c7c2fc1bf768cff612cc420b643d9831d Mon Sep 17 00:00:00 2001
+From: Simon Mikuda <simon.mikuda@gmail.com>
+Date: Sat, 21 Nov 2026 11:17:55 +0100
+Subject: [PATCH 1/2] transport: Allow a local A2DP sink to set its Delay
+
+A2DP sinks with DelayReporting had no way to tell the source their delay:
+the Delay property was read-only and the initial report bluetoothd sends
+when the stream reaches CONFIGURED always carried 0.
+
+Make Delay writable on the transport of a local A2DP sink, and always
+present when its endpoint registered with DelayReporting. A value set
+while the stream is being configured (from the endpoint's
+SetConfiguration, before replying) is kept and goes out as the initial
+delay report; afterwards a new value is reported right away, also in the
+OPEN state.
+
+Backport for 5.72 of what upstream 5.79 does with commits
+14f868fd1 ("transport: always show A2DP Delay property as sink if
+DelayReporting") and 6847b38ea ("transport: Allow to set A2DP transport
+delay property"), plus the initial report.
+
+Upstream-Status: Inappropriate [5.72 backport; upstream has the setter since 5.79 (6847b38ea, 14f868fd1)]
+---
+ profiles/audio/avdtp.c     | 22 +++++++++++++-
+ profiles/audio/avdtp.h     |  1 +
+ profiles/audio/media.c     |  5 ++++
+ profiles/audio/media.h     |  1 +
+ profiles/audio/transport.c | 60 +++++++++++++++++++++++++++++++++++++-
+ 5 files changed, 87 insertions(+), 2 deletions(-)
+
+diff --git a/profiles/audio/avdtp.c b/profiles/audio/avdtp.c
+index 3667e08..c92ea21 100644
+--- a/profiles/audio/avdtp.c
++++ b/profiles/audio/avdtp.c
+@@ -3759,6 +3759,25 @@ int avdtp_abort(struct avdtp *session, struct avdtp_stream *stream)
+ 	return ret;
+ }
+ 
++/* A local sink's delay. While the stream is still being configured it is
++ * kept, and goes out as the initial delay report when the stream reaches
++ * CONFIGURED; after that it is reported right away.
++ */
++int avdtp_stream_set_delay(struct avdtp_stream *stream, uint16_t delay)
++{
++	struct avdtp *session = stream->session;
++
++	if (!stream->delay_reporting)
++		return -ENOTSUP;
++
++	if (!g_slist_find(session->streams, stream)) {
++		stream->delay = delay;
++		return 0;
++	}
++
++	return avdtp_delay_report(session, stream, delay);
++}
++
+ int avdtp_delay_report(struct avdtp *session, struct avdtp_stream *stream,
+ 							uint16_t delay)
+ {
+@@ -3768,11 +3787,12 @@ int avdtp_delay_report(struct avdtp *session, struct avdtp_stream *stream,
+ 		return -EINVAL;
+ 
+ 	if (stream->lsep->state != AVDTP_STATE_CONFIGURED &&
++				stream->lsep->state != AVDTP_STATE_OPEN &&
+ 				stream->lsep->state != AVDTP_STATE_STREAMING)
+ 		return -EINVAL;
+ 
+ 	if (!stream->delay_reporting || session->version < 0x0103)
+-		return -EINVAL;
++		return -ENOTSUP;
+ 
+ 	stream->delay = delay;
+ 
+diff --git a/profiles/audio/avdtp.h b/profiles/audio/avdtp.h
+index 102a260..f74c721 100644
+--- a/profiles/audio/avdtp.h
++++ b/profiles/audio/avdtp.h
+@@ -275,6 +275,7 @@ int avdtp_suspend(struct avdtp *session, struct avdtp_stream *stream);
+ int avdtp_close(struct avdtp *session, struct avdtp_stream *stream,
+ 		gboolean immediate);
+ int avdtp_abort(struct avdtp *session, struct avdtp_stream *stream);
++int avdtp_stream_set_delay(struct avdtp_stream *stream, uint16_t delay);
+ int avdtp_delay_report(struct avdtp *session, struct avdtp_stream *stream,
+ 							uint16_t delay);
+ 
+diff --git a/profiles/audio/media.c b/profiles/audio/media.c
+index 1faa1c2..c9cf2f5 100644
+--- a/profiles/audio/media.c
++++ b/profiles/audio/media.c
+@@ -3335,6 +3335,11 @@ struct a2dp_sep *media_endpoint_get_sep(struct media_endpoint *endpoint)
+ 	return endpoint->sep;
+ }
+ 
++bool media_endpoint_get_delay_reporting(struct media_endpoint *endpoint)
++{
++	return endpoint->delay_reporting;
++}
++
+ const char *media_endpoint_get_uuid(struct media_endpoint *endpoint)
+ {
+ 	return endpoint->uuid;
+diff --git a/profiles/audio/media.h b/profiles/audio/media.h
+index 2b57987..177d0bd 100644
+--- a/profiles/audio/media.h
++++ b/profiles/audio/media.h
+@@ -19,6 +19,7 @@ void media_unregister(struct btd_adapter *btd_adapter);
+ 
+ struct a2dp_sep *media_endpoint_get_sep(struct media_endpoint *endpoint);
+ const char *media_endpoint_get_uuid(struct media_endpoint *endpoint);
++bool media_endpoint_get_delay_reporting(struct media_endpoint *endpoint);
+ uint8_t media_endpoint_get_codec(struct media_endpoint *endpoint);
+ struct btd_adapter *media_endpoint_get_btd_adapter(
+ 					struct media_endpoint *endpoint);
+diff --git a/profiles/audio/transport.c b/profiles/audio/transport.c
+index a469615..113db30 100644
+--- a/profiles/audio/transport.c
++++ b/profiles/audio/transport.c
+@@ -16,6 +16,7 @@
+ 
+ #define _GNU_SOURCE
+ #include <errno.h>
++#include <string.h>
+ 
+ #include <glib.h>
+ 
+@@ -834,12 +835,22 @@ static gboolean get_state(const GDBusPropertyTable *property,
+ 	return TRUE;
+ }
+ 
++static bool is_local_a2dp_sink(struct media_transport *transport)
++{
++	return transport->endpoint && !g_ascii_strcasecmp(
++		media_endpoint_get_uuid(transport->endpoint), A2DP_SINK_UUID);
++}
++
+ static gboolean delay_reporting_exists(const GDBusPropertyTable *property,
+ 							void *data)
+ {
+ 	struct media_transport *transport = data;
+ 	struct a2dp_transport *a2dp = transport->data;
+ 
++	/* A local A2DP sink decides itself whether it reports a delay */
++	if (is_local_a2dp_sink(transport))
++		return media_endpoint_get_delay_reporting(transport->endpoint);
++
+ 	return a2dp->delay != 0;
+ }
+ 
+@@ -854,6 +865,52 @@ static gboolean get_delay_reporting(const GDBusPropertyTable *property,
+ 	return TRUE;
+ }
+ 
++static void set_delay_report(const GDBusPropertyTable *property,
++				DBusMessageIter *iter, GDBusPendingPropertySet id,
++				void *data)
++{
++	struct media_transport *transport = data;
++	struct avdtp_stream *stream;
++	uint16_t delay;
++	int err;
++
++	if (dbus_message_iter_get_arg_type(iter) != DBUS_TYPE_UINT16) {
++		g_dbus_pending_property_error(id,
++					ERROR_INTERFACE ".InvalidArguments",
++					"Expected UINT16");
++		return;
++	}
++
++	dbus_message_iter_get_basic(iter, &delay);
++
++	if (!is_local_a2dp_sink(transport)) {
++		g_dbus_pending_property_error(id,
++					ERROR_INTERFACE ".NotSupported",
++					"Only a local A2DP sink reports a delay");
++		return;
++	}
++
++	stream = a2dp_sep_get_stream(
++			media_endpoint_get_sep(transport->endpoint));
++	if (stream == NULL) {
++		g_dbus_pending_property_error(id, ERROR_INTERFACE ".Failed",
++							"No stream");
++		return;
++	}
++
++	DBG("Transport %s delay %u", transport->path, delay);
++
++	err = avdtp_stream_set_delay(stream, delay);
++	if (err < 0) {
++		g_dbus_pending_property_error(id, ERROR_INTERFACE ".Failed",
++					"%s (%d)", strerror(-err), -err);
++		return;
++	}
++
++	g_dbus_pending_property_success(id);
++	media_transport_update_delay(transport, delay);
++}
++
+ static gboolean volume_exists(const GDBusPropertyTable *property, void *data)
+ {
+ 	struct media_transport *transport = data;
+@@ -979,7 +1036,8 @@ static const GDBusPropertyTable transport_a2dp_properties[] = {
+ 	{ "Codec", "y", get_codec },
+ 	{ "Configuration", "ay", get_configuration },
+ 	{ "State", "s", get_state },
+-	{ "Delay", "q", get_delay_reporting, NULL, delay_reporting_exists },
++	{ "Delay", "q", get_delay_reporting, set_delay_report,
++						delay_reporting_exists },
+ 	{ "Volume", "q", get_volume, set_volume, volume_exists },
+ 	{ "Endpoint", "o", get_endpoint, NULL, endpoint_exists,
+ 				G_DBUS_PROPERTY_FLAG_EXPERIMENTAL },
+-- 
+2.43.0
+
