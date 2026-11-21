@@ -185,6 +185,12 @@ public:
         return out;
     }
 
+    // count sectors from the file's sector `sector` on, straight off the disk (the files are
+    // contiguous): a read can run on past the file's end into the next one.
+    Bytes read_sectors(const FoundFile& f, uint32_t sector, uint16_t count) {
+        return h_.read10(uint32_t(cluster_lba(f.cluster)) + sector, count);
+    }
+
     // Reads [offset, offset+n) of a file by walking its chain, like f_lseek + f_read.
     Bytes read_file(const FoundFile& f, uint32_t offset, uint32_t n) {
         Bytes out;

@@ -233,15 +233,16 @@ int FatVolume::file_at(uint32_t cluster) const {
 }
 
 void FatVolume::read(uint64_t lba, uint32_t count, uint8_t* out) {
+    int first_file = -1;          // the file this read is for: the one it starts in
     while (count) {
-        uint32_t n = read_run(lba, count, out);
+        uint32_t n = read_run(lba, count, out, first_file);
         lba += n;
         count -= n;
         out += size_t(n) * kSector;
     }
 }
 
-uint32_t FatVolume::read_run(uint64_t lba, uint32_t max, uint8_t* out) {
+uint32_t FatVolume::read_run(uint64_t lba, uint32_t max, uint8_t* out, int& first_file) {
     {
         std::lock_guard<std::mutex> lk(overlay_mu_);
         auto it = overlay_.find(lba);
@@ -296,7 +297,11 @@ uint32_t FatVolume::read_run(uint64_t lba, uint32_t max, uint8_t* out) {
     }
     uint64_t off = uint64_t(file_sector) * kSector, len = uint64_t(n) * kSector;
     uint64_t in_file = off < f.size ? std::min<uint64_t>(len, f.size - off) : 0;
-    if (in_file) f.read(uint32_t(off), out, in_file);
+    if (first_file < 0) first_file = idx;
+    if (in_file) {
+        if (idx != first_file && f.peek) f.peek(uint32_t(off), out, in_file);
+        else f.read(uint32_t(off), out, in_file);
+    }
     memset(out + in_file, 0, len - in_file);
     return n;
 }

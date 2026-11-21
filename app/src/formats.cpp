@@ -156,7 +156,8 @@ Bytes id3v2_tag(const TrackInfo& t, size_t size, Charset cs) {
         if (it.v.empty()) continue;
         Bytes payload;
         std::u16string u = to_ucs2(it.v, cs);
-        if (u.size() > 200) u.resize(200);
+        // Head units show 63 characters of a v2 field (Sony's manual): more is never seen.
+        if (u.size() > 63) u.resize(63);
         bool latin = std::all_of(u.begin(), u.end(), [](char16_t c) { return c <= 0xFF; });
         if (latin) {
             payload.push_back(0);

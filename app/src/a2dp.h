@@ -3,7 +3,11 @@
 // L2CAP socket and the SBC frames decoded with libsbc straight into the live stream.
 //
 // Only 44.1 kHz is offered, which every phone sends and which is what the WAV files carry, so
-// nothing is ever resampled (on the Zero W resampling costs more than SBC itself).
+// nothing is resampled to another rate (drift.h only nudges it by a few ppm).
+//
+// With a delay to report, the endpoint offers AVDTP delay reporting and tells the phone that
+// delay (for its A/V sync): set on the transport while the phone configures the stream, it goes
+// out as the initial delay report (needs the patched BlueZ 5.72 of the image, or >= 5.79).
 #pragma once
 
 #include "stream.h"
@@ -18,7 +22,8 @@ struct sd_bus_message;
 
 class A2dpSink {
 public:
-    A2dpSink(LiveStream& stream, bool apply_volume, int rt_priority);
+    // delay_ms: what to report to the phone, 0 for no delay reporting.
+    A2dpSink(LiveStream& stream, bool apply_volume, int rt_priority, int delay_ms = 0);
     ~A2dpSink();
 
     // All of these run on the BlueZ event loop thread.
@@ -31,7 +36,8 @@ public:
     int select_configuration(sd_bus_message* m);
     int set_configuration(sd_bus_message* m);
     int clear_configuration(sd_bus_message* m);
-    void acquired(const std::string& path, int fd, uint16_t read_mtu);
+    void acquired(sd_bus* bus, const std::string& path, int fd, uint16_t read_mtu);
+    void delay_reported(const std::string& path, const char* error);   // the Set's reply
 
     bool streaming() const { return streaming_; }
     uint64_t packets_lost() const { return lost_; }
@@ -42,13 +48,15 @@ public:
     void set_volume(int v) { volume_ = v; }
 
 private:
-    struct Transport { std::string state; Bytes config; int volume = -1; };
+    struct Transport { std::string state; Bytes config; int volume = -1; bool delay_sent = false; };
     void acquire(sd_bus* bus, const std::string& path);
+    void report_delay(sd_bus* bus, const std::string& path, uint16_t delay);
     void stop_reader();
 
     LiveStream& stream_;
     bool apply_volume_;
     int rt_prio_;
+    uint16_t delay_;   // in 1/10 ms, as AVDTP has it
     std::mutex mu_;
     std::map<std::string, Transport> transports_;
     std::string reading_path_;

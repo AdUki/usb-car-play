@@ -1,7 +1,9 @@
 // radio-play: plays a WAV file from a mounted stick the way a head unit does, for tests through
 // a real USB host stack (dummy_hcd on the board, or a PC with the board plugged in).
 //
-//   radio-play [--out pcm.raw] [--seconds N] FILE [FILE...]     play each FILE for N seconds
+//   radio-play [--out pcm.raw] [--seconds N] [--resume S] FILE [FILE...]
+//                                     play each FILE for N seconds (the first from S s in, as a
+//                                     radio resuming where it was at power-off)
 //   radio-play --analyze pcm.raw [--expect HZ]                   pitch, clicks, silent gaps
 //
 // Reads go through O_DIRECT in 32 KiB chunks into a 192 KiB buffer that a 44.1 kHz "decoder"
@@ -45,7 +47,7 @@ static std::string wav_title(const uint8_t* h, size_t n, size_t& data_off) {
     return title;
 }
 
-static int play(const std::vector<std::string>& files, double seconds, FILE* out) {
+static int play(const std::vector<std::string>& files, double seconds, double resume, FILE* out) {
     const size_t chunk = 32768, cap = 196608, start = 65536;
     void* raw = nullptr;
     if (posix_memalign(&raw, 4096, chunk)) return 1;
@@ -64,14 +66,25 @@ static int play(const std::vector<std::string>& files, double seconds, FILE* out
         std::vector<uint8_t> buf;
         off_t pos = 0;
         size_t skip = data_off;
+        if (resume > 0 && &path == &files[0]) {
+            // A resume: straight from the header to the remembered position, 4 KiB aligned.
+            off_t at = off_t(data_off + uint64_t(resume * 44100) * 4);
+            pos = at - at % 4096;
+            skip = size_t(std::max<off_t>(0, off_t(data_off) - pos));
+        }
         bool playing = false;
         double t0 = now(), t_last = 0, frac = 0;
-        while (now() - t0 < seconds) {
-            if (buf.size() + chunk <= cap) {
+        bool eof = false;   // then play out what is buffered, as a radio does, before the next file
+        while (now() - t0 < seconds && !(eof && buf.size() < 4)) {
+            if (!eof && buf.size() + chunk <= cap) {
                 double r0 = now();
                 ssize_t n = pread(fd, io, chunk, pos);
                 max_read = std::max(max_read, now() - r0);
-                if (n <= 0) break;
+                if (n <= 0) {
+                    eof = true;
+                    playing = true;
+                    continue;
+                }
                 pos += n;
                 size_t s = std::min<size_t>(skip, n);
                 skip -= s;
@@ -89,7 +102,7 @@ static int play(const std::vector<std::string>& files, double seconds, FILE* out
             size_t frames = size_t(frac);
             frac -= frames;
             if (frames * 4 > buf.size()) {
-                underruns++;
+                if (!eof) underruns++;
                 frames = buf.size() / 4;
             }
             if (out) fwrite(buf.data(), 4, frames, out);
@@ -134,7 +147,7 @@ static int analyze(const char* path, double expect) {
 
 int main(int argc, char** argv) {
     std::vector<std::string> files;
-    double seconds = 10, expect = 0;
+    double seconds = 10, expect = 0, resume = 0;
     const char *out_path = nullptr, *analyze_path = nullptr;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
@@ -142,6 +155,7 @@ int main(int argc, char** argv) {
         else if (a == "--out" && i + 1 < argc) out_path = argv[++i];
         else if (a == "--analyze" && i + 1 < argc) analyze_path = argv[++i];
         else if (a == "--expect" && i + 1 < argc) expect = atof(argv[++i]);
+        else if (a == "--resume" && i + 1 < argc) resume = atof(argv[++i]);
         else files.push_back(a);
     }
     if (analyze_path) return analyze(analyze_path, expect);
@@ -151,7 +165,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     FILE* out = out_path ? fopen(out_path, "wb") : nullptr;
-    int rc = play(files, seconds, out);
+    int rc = play(files, seconds, resume, out);
     if (out) fclose(out);
     return rc;
 }

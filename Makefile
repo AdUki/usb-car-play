@@ -66,7 +66,7 @@ $(BUILD)/CMakeCache.txt:
 	@cmake -S $(APP) -B $(BUILD) -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON >/dev/null
 
 .PHONY: test
-test: build ## Unit tests and the real-time radio simulation (about 20 s)
+test: build ## Unit tests and the real-time radio simulations (about 1.5 min)
 	@ctest --test-dir $(BUILD) --output-on-failure
 
 .PHONY: check-image

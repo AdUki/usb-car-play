@@ -21,6 +21,7 @@ add_library(btdisk_core STATIC
   src/a2dp.cpp
   src/bluez.cpp
   src/config.cpp
+  src/drift.cpp
   src/fat.cpp
   src/ffs.cpp
   src/formats.cpp
@@ -39,7 +40,7 @@ install(TARGETS btdisk RUNTIME DESTINATION bin)
 option(BTDISK_TESTS "Build the tests" ON)
 if(BTDISK_TESTS)
   enable_testing()
-  add_executable(btdisk-tests tests/test_main.cpp tests/radio_sim.cpp)
+  add_executable(btdisk-tests tests/test_main.cpp tests/test_drift.cpp tests/radio_sim.cpp)
   target_link_libraries(btdisk-tests PRIVATE btdisk_core)
   add_test(NAME unit COMMAND btdisk-tests --unit)
   add_test(NAME radio-sim COMMAND btdisk-tests --radio)

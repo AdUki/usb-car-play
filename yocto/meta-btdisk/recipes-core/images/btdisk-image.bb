@@ -16,6 +16,7 @@ IMAGE_INSTALL = " \
     packagegroup-core-boot \
     btdisk \
     btdisk-base \
+    lame \
     bluez5 \
     bluez-firmware-rpidistro-bcm43430a1-hcd \
     kernel-module-hci-uart \

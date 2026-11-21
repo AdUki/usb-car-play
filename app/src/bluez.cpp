@@ -2,6 +2,7 @@
 
 #include "a2dp.h"
 
+#include <cstdarg>
 #include <cstring>
 #include <sys/eventfd.h>
 #include <sys/ioctl.h>
@@ -153,6 +154,7 @@ int on_timer(sd_event_source* s, uint64_t usec, void* ud);
 
 Bluez::Bluez(BluezOptions opt, A2dpSink* a2dp) : opt_(std::move(opt)), a2dp_(a2dp) {
     wake_fd_ = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    started_ = now_s();
 }
 
 Bluez::~Bluez() {
@@ -176,7 +178,7 @@ int on_wake(sd_event_source*, int fd, uint32_t, void* ud) {
 }
 int on_timer(sd_event_source* s, uint64_t usec, void* ud) {
     static_cast<Bluez*>(ud)->loop_event(true);
-    sd_event_source_set_time(s, usec + 5000000);
+    sd_event_source_set_time(s, usec + 1000000);
     sd_event_source_set_enabled(s, SD_EVENT_ON);
     return 0;
 }
@@ -216,16 +218,21 @@ void Bluez::loop() {
     sd_event_add_time(event_, nullptr, CLOCK_MONOTONIC, now + 2000000, 0, on_timer, this);
     bluez_owner_changed(true);
     while (!quit_) {
-        r = sd_event_run(event_, 1000000);
+        r = sd_event_run(event_, step_active_ ? 50000 : 1000000);
         if (r < 0) {
             LOGW("bluetooth: event loop: %s", strerror(-r));
             break;
         }
+        if (step_active_) run_commands();
     }
 }
 
 void Bluez::bluez_owner_changed(bool present) {
+    // The start-up check and bluetoothd's NameOwnerChanged can both report it up.
+    if (present == bluez_up_) return;
     if (!present) {
+        bluez_up_ = false;
+        connecting_ = false;
         LOGI("bluetooth: bluetoothd went away");
         if (a2dp_) a2dp_->reset();
         std::lock_guard<std::mutex> lk(mu_);
@@ -244,6 +251,7 @@ void Bluez::bluez_owner_changed(bool present) {
         sd_bus_error_free(&err);
         return;
     }
+    bluez_up_ = true;
     LOGI("bluetooth: BlueZ is up");
     if (sd_bus_message_enter_container(reply, 'a', "{oa{sa{sv}}}") > 0) {
         while (sd_bus_message_enter_container(reply, 'e', "oa{sa{sv}}") > 0) {
@@ -254,6 +262,8 @@ void Bluez::bluez_owner_changed(bool present) {
         }
     }
     sd_bus_message_unref(reply);
+    last_reconnect_ = now_s();
+    reconnect();
     if (opt_.agent) {
         r = sd_bus_call_method(bus_, kBluez, "/org/bluez", "org.bluez.AgentManager1",
                                "RegisterAgent", &err, nullptr, "os", kAgentPath, "NoInputNoOutput");
@@ -265,22 +275,49 @@ void Bluez::bluez_owner_changed(bool present) {
     }
 }
 
-void Bluez::adapter_added(const std::string& path) {
-    sd_bus_error err = SD_BUS_ERROR_NULL;
-    const char* a = path.c_str();
-    const char* i = "org.bluez.Adapter1";
-    sd_bus_set_property(bus_, kBluez, a, i, "Powered", &err, "b", 1);
-    sd_bus_set_property(bus_, kBluez, a, i, "Alias", &err, "s", opt_.alias.c_str());
-    sd_bus_set_property(bus_, kBluez, a, i, "Pairable", &err, "b", 1);
-    if (opt_.discoverable_s >= 0) {
-        sd_bus_set_property(bus_, kBluez, a, i, "DiscoverableTimeout", &err, "u",
-                            uint32_t(opt_.discoverable_s));
-        sd_bus_set_property(bus_, kBluez, a, i, "Discoverable", &err, "b", 1);
-    }
-    sd_bus_error_free(&err);
-    LOGI("bluetooth: adapter %s as \"%s\"", a, opt_.alias.c_str());
+void Bluez::adapter_added(const std::string& path, bool powered) {
+    LOGI("bluetooth: adapter %s", path.c_str());
+    // Fails while bluetoothd is powering it on by itself; either way it reports Powered after.
+    if (!powered) set_adapter_prop(path, false, "Powered", "b", 1);
+    configure_adapter(path, powered);
     if (opt_.central) set_central(path);
     if (a2dp_) a2dp_->register_endpoint(bus_, path);
+}
+
+bool Bluez::set_adapter_prop(const std::string& path, bool warn, const char* name, const char* type, ...) {
+    // One error per call: sd-bus refuses a call whose error is already set, so a shared one
+    // would turn the first failure into silently skipping every later property.
+    sd_bus_error err = SD_BUS_ERROR_NULL;
+    va_list ap;
+    va_start(ap, type);
+    sd_bus_message* m = nullptr;
+    int r = sd_bus_message_new_method_call(bus_, &m, kBluez, path.c_str(),
+                                           "org.freedesktop.DBus.Properties", "Set");
+    if (r >= 0) r = sd_bus_message_append(m, "ss", "org.bluez.Adapter1", name);
+    if (r >= 0) r = sd_bus_message_open_container(m, 'v', type);
+    if (r >= 0) r = sd_bus_message_appendv(m, type, ap);
+    if (r >= 0) r = sd_bus_message_close_container(m);
+    if (r >= 0) r = sd_bus_call(bus_, m, 0, &err, nullptr);
+    va_end(ap);
+    if (r < 0 && warn)
+        LOGW("bluetooth: %s %s not set: %s", path.c_str(), name,
+             err.message && *err.message ? err.message : err.name ? err.name : strerror(-r));
+    sd_bus_message_unref(m);
+    sd_bus_error_free(&err);
+    return r >= 0;
+}
+
+void Bluez::configure_adapter(const std::string& path, bool powered) {
+    bool ok = set_adapter_prop(path, true, "Alias", "s", opt_.alias.c_str());
+    ok &= set_adapter_prop(path, true, "Pairable", "b", 1);
+    if (!powered) return;
+    if (opt_.discoverable_s >= 0) {
+        ok &= set_adapter_prop(path, true, "DiscoverableTimeout", "u", uint32_t(opt_.discoverable_s));
+        ok &= set_adapter_prop(path, true, "Discoverable", "b", 1);
+    }
+    if (ok && opt_.discoverable_s > 0)
+        LOGI("bluetooth: \"%s\", discoverable for %.0f s", opt_.alias.c_str(), opt_.discoverable_s);
+    else if (ok) LOGI("bluetooth: \"%s\"", opt_.alias.c_str());
 }
 
 void Bluez::set_central(const std::string& adapter) {
@@ -312,18 +349,36 @@ void Bluez::handle_interfaces(const std::string& path, sd_bus_message* m) {
 
 void Bluez::on_props(const std::string& path, const std::string& iface, sd_bus_message* m) {
     if (iface == "org.bluez.MediaTransport1") {
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            transports_.insert(path);
+        }
         if (a2dp_) a2dp_->on_transport_props(bus_, path, m);
         else sd_bus_message_skip(m, "a{sv}");
         return;
     }
     if (iface == "org.bluez.Adapter1") {
-        sd_bus_message_skip(m, "a{sv}");
+        bool powered = false;
+        each_prop(m, [&](const std::string& k, sd_bus_message* mm) {
+            Value v;
+            if (!read_variant(mm, v)) return true;
+            if (k == "Powered") powered = v.b;
+            return true;
+        });
         bool is_new;
         {
             std::lock_guard<std::mutex> lk(mu_);
             is_new = adapters_.insert(path).second;
         }
-        if (is_new) adapter_added(path);
+        // Discoverable needs a powered adapter: bluetoothd is often still powering it up when it
+        // appears, and powers it again after a controller reset. Set it once it says Powered.
+        if (is_new) adapter_added(path, powered);
+        else if (powered) configure_adapter(path, true);
+        // Call the phone now rather than at the next tick: every second counts after power-on.
+        if (powered && bluez_up_) {
+            last_reconnect_ = now_s();
+            reconnect();
+        }
         return;
     }
     std::string trust_path;
@@ -345,9 +400,23 @@ void Bluez::on_props(const std::string& path, const std::string& iface, sd_bus_m
                 return true;
             });
             if (d.paired && !d.trusted && opt_.agent) trust_path = path;
-            if (conn_changed)
+            if (conn_changed) {
                 LOGI("bluetooth: %s %s %s", d.name.c_str(), d.address.c_str(),
                      d.connected ? "connected" : "disconnected");
+                d.connected_at = d.connected ? now_s() : 0;
+            }
+            // The phone to call first next time. A phone pairing anew connects before it is
+            // paired, so this is checked on every change, not only on connecting.
+            if (d.connected && d.paired && !d.address.empty() &&
+                (d.address != last_phone_ || d.name != last_phone_name_)) {
+                last_phone_ = d.address;
+                last_phone_name_ = d.name;
+                if (FILE* f = opt_.last_phone_file.empty() ? nullptr
+                              : fopen(opt_.last_phone_file.c_str(), "w")) {
+                    fprintf(f, "%s\n%s\n", last_phone_.c_str(), last_phone_name_.c_str());
+                    fclose(f);
+                }
+            }
         } else if (iface == "org.bluez.MediaPlayer1") {
             PlayerObj& p = players_[path];
             each_prop(m, [&](const std::string& k, sd_bus_message* mm) {
@@ -359,6 +428,8 @@ void Bluez::on_props(const std::string& path, const std::string& iface, sd_bus_m
                 if (!read_variant(mm, v)) return true;
                 if (k == "Status") p.status = v.s;
                 else if (k == "Device") p.device = v.s;
+                else if (k == "Position" && v.u < 1500 && step_active_ && !step_.restarted)
+                    step_.restarted = now_s();
                 return true;
             });
             if (p.device.empty()) p.device = path.substr(0, path.rfind('/'));
@@ -374,6 +445,10 @@ void Bluez::on_props(const std::string& path, const std::string& iface, sd_bus_m
 
 void Bluez::on_removed(const std::string& path, const std::string& iface) {
     if (iface == "org.bluez.MediaTransport1") {
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            transports_.erase(path);
+        }
         if (a2dp_) a2dp_->on_transport_removed(path);
         return;
     }
@@ -431,47 +506,186 @@ void Bluez::set_prop_async(const std::string& path, const char* iface, const cha
     sd_bus_message_unref(m);
 }
 
-void Bluez::reconnect() {
-    // Like a car kit: while no phone is connected, page the paired ones in turn.
-    std::vector<std::string> candidates;
+namespace {
+int connect_reply(sd_bus_message* m, void* ud, sd_bus_error*) {
+    auto* ctx = static_cast<std::pair<Bluez*, std::string>*>(ud);
+    ctx->first->on_connect_reply(ctx->second, m);
+    delete ctx;
+    return 0;
+}
+}  // namespace
+
+void Bluez::on_connect_reply(const std::string& path, sd_bus_message* reply) {
+    connecting_ = false;
+    const sd_bus_error* e = sd_bus_message_get_error(reply);
+    std::string name;
     {
         std::lock_guard<std::mutex> lk(mu_);
-        for (auto& [path, d] : devices_) if (d.connected) return;
-        for (auto& [path, d] : devices_) if (d.paired) candidates.push_back(path);
+        auto d = devices_.find(path);
+        name = d != devices_.end() ? d->second.name : path;
     }
-    if (candidates.empty()) return;
-    const std::string& path = candidates[reconnect_idx_++ % candidates.size()];
-    LOGD("bluetooth: reconnecting %s", path.c_str());
-    sd_bus_call_method_async(bus_, nullptr, kBluez, path.c_str(), "org.bluez.Device1", "Connect",
-                             nullptr, nullptr, "");
+    if (e) LOGI("bluetooth: connecting %s: %s", name.c_str(), e->message ? e->message : e->name);
+    else LOGI("bluetooth: connecting %s: done", name.c_str());
+}
+
+void Bluez::load_last_phone() {
+    // Read when first needed rather than at start: the data partition is mounted after btdisk
+    // starts. The file: the address, then the name.
+    if (!last_phone_.empty() || opt_.last_phone_file.empty() || now_s() - last_phone_read_ < 2) return;
+    last_phone_read_ = now_s();
+    if (FILE* f = fopen(opt_.last_phone_file.c_str(), "r")) {
+        char buf[256] = {};
+        if (fgets(buf, sizeof buf, f)) last_phone_ = std::string(buf, strcspn(buf, "\n"));
+        if (fgets(buf, sizeof buf, f)) last_phone_name_ = std::string(buf, strcspn(buf, "\n"));
+        fclose(f);
+    }
+}
+
+std::string Bluez::phone_name() {
+    std::lock_guard<std::mutex> lk(mu_);
+    const PlayerObj* p = active();
+    if (p) {
+        auto d = devices_.find(p->device);
+        if (d != devices_.end() && !d->second.name.empty()) return d->second.name;
+    }
+    for (auto& [path, d] : devices_)
+        if (d.connected && d.paired && !d.name.empty()) return d.name;
+    load_last_phone();
+    return last_phone_name_;
+}
+
+void Bluez::reconnect() {
+    // Like a car kit: while no phone is connected, page the paired ones in turn, the one that
+    // was connected last every other time. A phone connected without audio (A2DP did not come
+    // up with the link) gets A2DP asked for.
+    if (connecting_) return;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        load_last_phone();
+    }
+    std::vector<std::string> candidates;
+    std::string last, repair;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        double now = now_s();
+        bool any = false;
+        for (auto& [path, d] : devices_) {
+            if (!d.connected) continue;
+            any = true;
+            auto t = transports_.lower_bound(path + "/");
+            bool audio = t != transports_.end() && t->compare(0, path.size() + 1, path + "/") == 0;
+            if (!audio && d.paired && now - d.connected_at > 10 && now - d.profile_tried > 30) {
+                d.profile_tried = now;
+                repair = path;
+            }
+        }
+        if (!any) {
+            for (auto& [path, d] : devices_) {
+                if (!d.paired) continue;
+                if (d.address == last_phone_) last = path;
+                else candidates.push_back(path);
+            }
+        }
+    }
+    const char* method = "Connect";
+    const char* uuid = nullptr;
+    std::string path;
+    if (!repair.empty()) {
+        path = repair;
+        method = "ConnectProfile";
+        uuid = "0000110a-0000-1000-8000-00805f9b34fb";      // the phone's A2DP source
+        LOGI("bluetooth: %s is connected without audio: asking for A2DP", path.c_str());
+    } else if (!last.empty() && (candidates.empty() || reconnect_idx_++ % 2 == 0)) {
+        path = last;
+    } else if (!candidates.empty()) {
+        path = candidates[reconnect_idx_++ % candidates.size()];
+    } else {
+        return;
+    }
+    LOGI("bluetooth: %s %s", uuid ? "asking for A2DP from" : "calling", path.c_str());
+    auto* ctx = new std::pair<Bluez*, std::string>(this, path);
+    int r = uuid ? sd_bus_call_method_async(bus_, nullptr, kBluez, path.c_str(), "org.bluez.Device1",
+                                            method, connect_reply, ctx, "s", uuid)
+                 : sd_bus_call_method_async(bus_, nullptr, kBluez, path.c_str(), "org.bluez.Device1",
+                                            method, connect_reply, ctx, "");
+    if (r < 0) delete ctx;
+    else connecting_ = true;
 }
 
 void Bluez::loop_event(bool tick) {
-    // On the event loop thread: sd-bus is not thread safe, so commands from the USB side are
-    // queued and sent from here.
-    std::deque<std::string> cmds;
-    std::string player;
-    {
-        std::lock_guard<std::mutex> lk(mu_);
-        cmds.swap(commands_);
-        const PlayerObj* p = active();
-        for (auto& [path, obj] : players_) if (&obj == p) player = path;
-    }
-    if (tick && opt_.reconnect_s > 0 && now_s() - last_reconnect_ >= opt_.reconnect_s) {
+    // Every few seconds for the first minutes after power-on (the phone comes into the car),
+    // then less often.
+    double every = now_s() - started_ < 180 ? std::min(opt_.reconnect_s, 5.0) : opt_.reconnect_s;
+    if (tick && opt_.reconnect_s > 0 && now_s() - last_reconnect_ >= every) {
         last_reconnect_ = now_s();
         reconnect();
     }
-    for (auto& c : cmds) {
-        if (player.empty()) {
-            LOGI("bluetooth: no player for \"%s\"", c.c_str());
-            continue;
-        }
-        std::string method = c == "next" ? "Next" : c == "previous" ? "Previous"
-                           : c == "play" ? "Play" : c == "pause" ? "Pause" : "";
-        if (method.empty()) continue;
-        sd_bus_call_method_async(bus_, nullptr, kBluez, player.c_str(), "org.bluez.MediaPlayer1",
-                                 method.c_str(), nullptr, nullptr, "");
+    run_commands();
+}
+
+bool Bluez::send_player(const char* method) {
+    std::string player;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        const PlayerObj* p = active();
+        for (auto& [path, obj] : players_) if (&obj == p) player = path;
     }
+    if (player.empty()) {
+        LOGI("bluetooth: no player for %s", method);
+        return false;
+    }
+    sd_bus_call_method_async(bus_, nullptr, kBluez, player.c_str(), "org.bluez.MediaPlayer1",
+                             method, nullptr, nullptr, "");
+    return true;
+}
+
+void Bluez::run_commands() {
+    // On the event loop thread: sd-bus is not thread safe, so commands from the USB side are
+    // queued and sent from here. Next/Previous go one at a time: a phone given several at once
+    // carries out one or two (the S25 with YouTube Music: three Next moved one track).
+    // "previous" is one track back; a phone that has played a few seconds restarts the track
+    // on Previous instead (its position goes to 0, the track stays), so it gets another.
+    // (The S25 with YouTube Music: 3 s into a track Previous restarts it.)
+    // "restart" is a single Previous: the radio restarted its file.
+    std::unique_lock<std::mutex> lk(mu_);
+    double now = now_s();
+    if (step_active_) {
+        bool changed = track_.display_name() != step_.from;
+        // Android reports the position only when it moved from what it reported last: a restart
+        // soon after another goes unseen, so no new title within a second counts as one too.
+        bool restarted = step_.restarted ? now - step_.restarted > 0.4 : now > step_.deadline - 0.5;
+        if (!changed && restarted && step_.cmd == "previous" && !step_.retried) {
+            step_.retried = true;
+            step_.restarted = 0;
+            step_.deadline = now + 1.5;
+            lk.unlock();
+            LOGI("bluetooth: the phone restarted the track: Previous again");
+            if (send_player("Previous")) return;
+            lk.lock();
+        } else if (!changed && !(step_.cmd == "restart" && step_.restarted) && now < step_.deadline) {
+            return;
+        } else if (!changed && step_.cmd != "restart") {
+            LOGI("bluetooth: the phone did not change track after %s", step_.cmd.c_str());
+        }
+        step_active_ = false;
+    }
+    while (!step_active_ && !commands_.empty()) {
+        std::string c = commands_.front();
+        commands_.pop_front();
+        const char* method = c == "next" ? "Next" : c == "previous" || c == "restart" ? "Previous"
+                           : c == "play" ? "Play" : c == "pause" ? "Pause" : nullptr;
+        if (!method) continue;
+        bool step = c == "next" || c == "previous" || c == "restart";
+        if (step) {
+            step_ = Step{c, track_.display_name(), now + 1.5, 0, false};
+            step_active_ = true;
+        }
+        lk.unlock();
+        bool sent = send_player(method);
+        lk.lock();
+        if (!sent) step_active_ = false;
+    }
+    if (!step_active_ && commands_.empty()) cv_.notify_all();
 }
 
 void Bluez::command(const std::string& cmd) {
@@ -495,8 +709,10 @@ uint64_t Bluez::track_version() {
 
 bool Bluez::wait_track_change(uint64_t version, double timeout_s) {
     std::unique_lock<std::mutex> lk(mu_);
-    return cv_.wait_for(lk, std::chrono::duration<double>(timeout_s),
-                        [&] { return version_ != version; });
+    // Until the commands sent so far are all carried out: the track they end on.
+    cv_.wait_for(lk, std::chrono::duration<double>(timeout_s),
+                 [&] { return version_ != version && !step_active_ && commands_.empty(); });
+    return version_ != version;
 }
 
 std::string Bluez::status() {

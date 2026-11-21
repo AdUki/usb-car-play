@@ -4,12 +4,17 @@
 // which track it is on, starting after a second of silence. Then the radio presses Next and
 // Previous. Checked: no underruns while playing, no clicks, the latency, that the commands
 // reached the phone, the new track's title in the header, and the new track's audio.
+//
+// Then drift: a phone whose clock runs fast and a radio whose clock runs slow, exaggerated so
+// that half a minute shows what hours would. Checked: both clocks measured, the backlog behind
+// the radio held still, no skips, underruns or clicks.
 
 #include "host.h"
 #include "player.h"
 #include "stream.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
@@ -60,7 +65,12 @@ struct Segment {
 
 class Radio {
 public:
-    Radio(FatReader& fs, std::vector<FoundFile> files) : fs_(fs), files_(std::move(files)) {}
+    // A read-ahead buffer of `buffer` bytes refilled `chunk` at a time; playback starts at
+    // `start` bytes and runs `clock_ppm` off the wall clock.
+    Radio(FatReader& fs, std::vector<FoundFile> files, size_t chunk = 32768, size_t buffer = 196608,
+          size_t start = 65536, double clock_ppm = 0)
+        : fs_(fs), files_(std::move(files)), chunk_(chunk), buffer_(buffer), start_(start),
+          rate_(44100 * (1 + clock_ppm * 1e-6)) {}
 
     // Opens file i and plays it for `seconds` of wall time.
     Segment play(int i, double seconds, std::string& header_text) {
@@ -81,8 +91,8 @@ public:
         double t_start = now_s(), t_last = 0;
         double played_frames = 0;
         while (now_s() - t_start < seconds) {
-            if (buffer.size() + kChunk <= kBuffer) {
-                Bytes b = fs_.read_file(f, pos, kChunk);
+            if (buffer.size() + chunk_ <= buffer_) {
+                Bytes b = fs_.read_file(f, pos, uint32_t(chunk_));
                 pos += b.size();
                 buffer.insert(buffer.end(), b.begin(), b.end());
             } else {
@@ -90,14 +100,14 @@ public:
             }
             double now = now_s();
             if (!playing) {
-                if (buffer.size() >= kStart) {
+                if (buffer.size() >= start_) {
                     playing = true;
                     t_last = now;
                     seg.first_play = now;
                 }
                 continue;
             }
-            played_frames += (now - t_last) * 44100;
+            played_frames += (now - t_last) * rate_;
             t_last = now;
             size_t frames = size_t(played_frames);
             played_frames -= frames;
@@ -117,9 +127,10 @@ public:
     double underrun_s = 0;
 
 private:
-    static constexpr size_t kChunk = 32768, kBuffer = 196608, kStart = 65536;
     FatReader& fs_;
     std::vector<FoundFile> files_;
+    size_t chunk_, buffer_, start_;
+    double rate_;
 };
 
 double frequency(const std::vector<int16_t>& x, size_t from, size_t n) {
@@ -137,6 +148,106 @@ int clicks(const std::vector<int16_t>& x, size_t from) {
     return n;
 }
 
+double mean_between(const std::vector<std::pair<double, size_t>>& v, double a, double b) {
+    double sum = 0;
+    int n = 0;
+    for (auto& [t, x] : v)
+        if (t >= a && t < b) { sum += double(x); n++; }
+    return n ? sum / n : 0;
+}
+
+int run_drift_sim() {
+    const double phone_ppm = 1500, radio_ppm = -2500, seconds = 30;
+    int failures_before = g_failures;
+    ChunkQueue q;
+    WavEncoder enc(q, 44100, 2);
+    SimPhone phone;
+    PlayerConfig cfg;
+    cfg.files = 8;
+    cfg.file_size = 256u << 20;
+    cfg.guard_s = 1.0;
+    cfg.metadata_wait_s = 0;
+    cfg.pause_after_s = 0;
+    // A cushion bigger than the radio's buffer (below): the radio's buffer stays full and its
+    // reads come at its own pace, so its clock shows. With a smaller cushion it would wait on us.
+    cfg.target_latency_s = 0.8;
+    Player player(cfg, enc, phone);
+    FatVolume vol(player.make_files(), FatOptions{});
+    ScsiDisk disk(vol, "Generic", "USB Flash Disk", "0123456789AB", false);
+    disk.on_mount = [&] { player.on_mount(); };
+    DriftOptions drift;
+    drift.radio_period_s = 10;     // minutes in real life; seconds here
+    drift.max_ppm = 5000;
+    LiveStream stream(enc, 44100, 2, drift);
+    stream.start();
+
+    // The phone: a 440 Hz sine by its own (fast) clock, with its timeline like A2DP's.
+    std::atomic<bool> stop{false};
+    std::thread source([&] {
+        double phase = 0, t0 = now_s();
+        uint64_t sent = 0;
+        std::vector<int16_t> b(441 * 2);
+        while (!stop) {
+            for (size_t i = 0; i < 441; i++) {
+                b[2 * i] = b[2 * i + 1] = int16_t(12000 * std::sin(phase));
+                phase = std::fmod(phase + 2 * M_PI * 440 / 44100, 2 * M_PI);
+            }
+            stream.phone_timing(sent, now_s());
+            stream.write_pcm(reinterpret_cast<uint8_t*>(b.data()), b.size() * 2);
+            sent += 441;
+            double ahead = double(sent) / (44100 * (1 + phone_ppm * 1e-6)) - (now_s() - t0);
+            if (ahead > 0) usleep(useconds_t(ahead * 1e6));
+        }
+    });
+
+    UsbHost host(disk);
+    FatReader fs(host);
+    CHECK(fs.mount());
+    auto files = fs.list_root();
+    usleep(1100000);
+
+    // The backlog behind the radio, sampled through the run.
+    std::vector<std::pair<double, size_t>> backlog;
+    double t_play = now_s();
+    std::thread monitor([&] {
+        while (!stop && now_s() - t_play < seconds) {
+            backlog.emplace_back(now_s() - t_play, q.backlog());
+            if (getenv("DRIFT_VERBOSE") && backlog.size() % 50 == 0)
+                fprintf(stderr, "t=%4.1f backlog %.3f phone %+6.0f radio %+6.0f trim %+6.0f %s\n",
+                        now_s() - t_play, q.backlog() / double(enc.byte_rate), stream.phone_ppm(),
+                        stream.radio_ppm(), stream.trim_ppm(),
+                        stream.radio_locked() ? "locked" : "settling");
+            usleep(20000);
+        }
+    });
+    // A head unit with a small buffer (most have one): it paces its own reads, so its clock shows.
+    Radio radio(fs, files, 16384, 65536, 32768, radio_ppm);
+    std::string hdr;
+    Segment s = radio.play(0, seconds, hdr);
+    monitor.join();
+
+    double early = mean_between(backlog, 6, 12) / enc.byte_rate;
+    double late = mean_between(backlog, seconds - 6, seconds) / enc.byte_rate;
+    double uncorrected = (phone_ppm - radio_ppm) * 1e-6 * (seconds - 9);
+    double f = frequency(s.left, s.left.size() - 44100, 44100);
+    CHECK(std::fabs(stream.phone_ppm() - phone_ppm) < 100);
+    // Loose: a loop this fast is noisy. test_drift.cpp checks precision over a simulated hour.
+    CHECK(std::fabs(stream.radio_ppm() - radio_ppm) < 1200);
+    CHECK(std::fabs(late - early) < uncorrected / 4);
+    CHECK_EQ(radio.underruns, 0);
+    CHECK_EQ(player.data().skips(), 0u);
+    CHECK_EQ(clicks(s.left, 2 * 44100), 0);   // from 2 s: the tone's onset is not a glitch
+    CHECK(std::fabs(f - 440) < 5);
+    printf("drift sim: phone %+.0f ppm (measured %+.0f), radio %+.0f ppm (measured %+.0f), "
+           "backlog %.3f -> %.3f s (uncorrected: %+.3f s), %.0f Hz, underruns %d: %s\n",
+           phone_ppm, stream.phone_ppm(), radio_ppm, stream.radio_ppm(), early, late, uncorrected,
+           f, radio.underruns, g_failures == failures_before ? "ok" : "FAILED");
+    stop = true;
+    source.join();
+    stream.stop();
+    return g_failures != failures_before;
+}
+
 }  // namespace
 
 int run_radio_sim() {
@@ -145,8 +256,10 @@ int run_radio_sim() {
     WavEncoder enc(q, 44100, 2);
     SimPhone phone;
     PlayerConfig cfg;
+    cfg.files = 8;
     cfg.file_size = 256u << 20;
     cfg.wav_info = true;
+    cfg.tags = "track";
     cfg.guard_s = 1.0;
     cfg.metadata_wait_s = 1.0;
     cfg.pause_after_s = 0;
@@ -200,7 +313,8 @@ int run_radio_sim() {
     size_t onset = 0;
     for (size_t k = 0; k < s1.left.size(); k++)
         if (std::abs(s1.left[k]) > 1000) { onset = k; latency = s1.first_play + k / 44100.0 - tone_start; break; }
-    CHECK(latency > 0 && latency < 2.5);
+    // The 0.2 s cushion, or the radio's own start threshold (64 KiB, 0.37 s) when that is more.
+    CHECK(latency > 0.3 && latency < 0.6);
     CHECK_EQ(clicks(s1.left, onset + 100), 0);
     double f1 = onset ? frequency(s1.left, onset + 4410, 44100) : 0;
     CHECK(std::fabs(f1 - 440) < 5);
@@ -213,18 +327,19 @@ int run_radio_sim() {
     int clicks2 = clicks(s2.left, s2.left.size() / 2);
     CHECK_EQ(clicks2, 0);
 
-    // Previous after 4 s: the radio restarts file 2; the phone gets Previous.
+    // Previous after 4 s: the radio restarts file 2; the phone gets Previous, which restarts
+    // its track too (this phone: the same tone).
     Segment s3 = radio.play(1, 3.0, hdr);
-    CHECK(hdr.find("Song 0") != std::string::npos);
+    CHECK(hdr.find("Song 1") != std::string::npos);
     double f3 = frequency(s3.left, s3.left.size() - 44100, 44100);
-    CHECK(std::fabs(f3 - 440) < 5);
+    CHECK(std::fabs(f3 - 550) < 5);
 
     std::string sent;
     {
         std::lock_guard<std::mutex> lk(phone.mu);
         for (auto& c : phone.sent) sent += (sent.empty() ? "" : ",") + c;
     }
-    CHECK_EQ(sent, std::string("next,previous"));
+    CHECK_EQ(sent, std::string("next,restart"));
     CHECK_EQ(under1, 0);
     CHECK_EQ(radio.underruns, 0);
 
@@ -236,5 +351,5 @@ int run_radio_sim() {
     stop = true;
     source.join();
     stream.stop();
-    return g_failures != failures_before;
+    return run_drift_sim() || g_failures != failures_before;
 }

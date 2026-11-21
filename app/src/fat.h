@@ -20,6 +20,9 @@ struct VirtualFile {
     std::string short_name;                                     // 8.3, "TRACK01.WAV"
     uint32_t size = 0;
     std::function<void(uint32_t off, uint8_t* dst, size_t n)> read;
+    // The same bytes, for a read that started in the file before and only runs on into this
+    // one (a radio reading 2 KiB from the last sector of a file): no side effects. Optional.
+    std::function<void(uint32_t off, uint8_t* dst, size_t n)> peek;
     std::function<std::string()> long_name;                      // UTF-8, may change
     uint32_t first_cluster = 0, clusters = 0;                    // set by FatVolume
 };
@@ -52,7 +55,7 @@ public:
     uint64_t data_lba() const { return opt_.partition_offset + data_start_; }
 
 private:
-    uint32_t read_run(uint64_t lba, uint32_t max, uint8_t* out);
+    uint32_t read_run(uint64_t lba, uint32_t max, uint8_t* out, int& first_file);
     void mbr(uint8_t* s) const;
     void boot_sector(uint8_t* s) const;
     void fsinfo(uint8_t* s) const;

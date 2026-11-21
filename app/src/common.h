@@ -10,9 +10,11 @@
 using Bytes = std::vector<uint8_t>;
 
 // 0 = warnings, 1 = info (default), 2 = debug. Lines go to stderr, which journald keeps
-// (in RAM on the image), with the syslog priority prefix it understands.
+// (in RAM on the image), with the syslog priority prefix it understands, and to a file when
+// log_to_file() names one (kept across power cycles: what happened in the car).
 extern int g_log_level;
 void log_line(int level, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
+void log_to_file(const std::string& path, size_t max_bytes);   // max_bytes: then path.1
 #define LOGW(...) log_line(0, __VA_ARGS__)
 #define LOGI(...) do { if (g_log_level >= 1) log_line(1, __VA_ARGS__); } while (0)
 #define LOGD(...) do { if (g_log_level >= 2) log_line(2, __VA_ARGS__); } while (0)

@@ -7,9 +7,12 @@ LiveFileData::LiveFileData(Encoder& enc, uint32_t size, uint32_t align, double t
     : enc_(enc), size_(size), align_(align), target_(size_t(target_latency_s * enc.byte_rate)),
       cache_limit_(cache_bytes), max_block_(max_block_s) {}
 
-void LiveFileData::reset() {
+void LiveFileData::reset(bool continuous) {
     watermark_ = 0;
     started_ = false;
+    continuous_ = continuous;
+    grace_ = 0;
+    if (!continuous) carry_.clear();
     segs_.clear();
     cached_ = 0;
 }
@@ -37,9 +40,33 @@ void LiveFileData::from_cache(uint32_t offset, uint8_t* dst, size_t n) const {
 }
 
 void LiveFileData::start_live() {
-    // Hand the radio a cushion of target_ bytes and no more: older audio is stale.
+    if (continuous_) {
+        // The previous file ran out: carry on from where it stopped, so the radio's move to
+        // the next file is gapless. What queued up meanwhile is what the radio's buffer played
+        // out before it opened this file: the delay is unchanged, so fill() leaves it alone
+        // until the radio has read past it (within reason).
+        continuous_ = false;
+        grace_ = std::min(enc_.queue.backlog(), size_t(10 * enc_.byte_rate));
+        if (!carry_.empty() && carry_.size() <= size_ - watermark_) {
+            append(watermark_, carry_);
+            watermark_ += uint32_t(carry_.size());
+        }
+        carry_.clear();
+        return;
+    }
+    carry_.clear();
+    // Hand the radio exactly target_ of audio ahead of live: what is older is stale, and what is
+    // missing is made up with silence (in whole chunks). That fixes the latency at the target,
+    // which is also the delay reported to the phone.
     size_t dropped = enc_.queue.trim_to(target_);
     if (dropped) LOGD("start: dropped %zu stale bytes", dropped);
+    const Bytes& silence = enc_.silence_chunk();
+    size_t backlog = enc_.queue.backlog();
+    for (size_t pad = 0; backlog + pad + silence.size() <= target_; pad += silence.size()) {
+        if (silence.size() > size_ - watermark_) break;
+        append(watermark_, silence);
+        watermark_ += uint32_t(silence.size());
+    }
 }
 
 void LiveFileData::read(uint32_t offset, uint8_t* dst, size_t n) {
@@ -49,11 +76,16 @@ void LiveFileData::read(uint32_t offset, uint8_t* dst, size_t n) {
         return;
     }
     uint32_t end = uint32_t(end64);
-    if (offset > watermark_) {
-        // The radio skipped ahead: resume after power-up, fast forward, first read mid-file.
+    if (offset > watermark_ || (!segs_.empty() && offset < segs_.begin()->first)) {
+        // The radio skipped ahead (resume after power-up, fast forward, first read mid-file), or
+        // back behind what is kept (it came back from another source and starts the file over):
+        // carry on live from there rather than read silence until it is back at the watermark.
         uint32_t to = offset - offset % align_;
         LOGD("jump %u -> %u", watermark_, to);
         watermark_ = to;
+        continuous_ = false;
+        segs_.clear();
+        cached_ = 0;
         start_live();
     } else if (!started_) {
         start_live();
@@ -71,7 +103,8 @@ void LiveFileData::fill(uint32_t end) {
     size_t need = end - watermark_;
     size_t slack = 4 * enc_.silence_chunk().size();
     size_t backlog = enc_.queue.backlog();
-    if (backlog > need + 2 * target_ + slack) {
+    size_t grace = watermark_ < grace_ ? grace_ : 0;
+    if (backlog > need + 2 * target_ + slack + grace) {
         size_t dropped = enc_.queue.trim_to(target_ + need);
         skips_++;
         LOGI("radio fell behind live, skipped %.2f s", double(dropped) / enc_.byte_rate);
@@ -85,7 +118,15 @@ void LiveFileData::fill(uint32_t end) {
             chunk = enc_.silence_chunk();
         }
         uint32_t room = size_ - watermark_;
-        if (chunk.size() > room) chunk.assign(room, 0);
+        if (chunk.size() > room) {
+            // The file ends inside this chunk: what fits goes here, the rest starts the next
+            // file if the radio moves on to it (WAV). MP3 frames can't be cut: silence.
+            size_t split = enc_.split_bytes(), keep = split ? room - room % split : 0;
+            carry_.assign(chunk.begin() + keep, chunk.end());
+            if (!split) carry_.clear();
+            chunk.resize(keep);
+            chunk.resize(room, 0);
+        }
         append(watermark_, chunk);
         watermark_ += chunk.size();
     }

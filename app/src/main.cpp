@@ -44,12 +44,12 @@ PlayerConfig player_config(const Config& c) {
     p.rate = c.num("audio.rate", p.rate);
     p.channels = c.num("audio.channels", p.channels);
     p.files = c.num("player.files", p.files);
-    p.file_size = uint32_t(std::min<long>(c.num("player.file_mb", 1024), 4095) << 20);
+    p.file_size = uint32_t(std::min<long>(c.num("player.file_mb", 512), 4095) << 20);
     p.wav_info = c.flag("player.wav_info", p.wav_info);
     p.charset = parse_charset(c.str("player.charset", "latin1"));
     p.dynamic_names = c.flag("player.dynamic_names", p.dynamic_names);
     p.name_prefix = c.str("player.name_prefix", p.name_prefix);
-    p.target_latency_s = c.num("player.target_latency_ms", 800) / 1000.0;
+    p.target_latency_s = c.num("player.target_latency_ms", 200) / 1000.0;
     p.max_block_s = c.real("player.max_block_s", p.max_block_s);
     p.cache_bytes = size_t(c.num("player.cache_mb", 8)) << 20;
     p.guard_s = c.real("player.guard_s", p.guard_s);
@@ -58,6 +58,11 @@ PlayerConfig player_config(const Config& c) {
     p.restart_threshold_s = c.real("player.restart_threshold_s", p.restart_threshold_s);
     p.pause_after_s = c.real("player.pause_after_s", p.pause_after_s);
     p.autoplay = c.flag("player.autoplay", p.autoplay);
+    p.tags = c.str("player.tags", p.tags);
+    if (p.tags != "phone" && p.tags != "track") {
+        LOGW("player.tags must be phone or track, not %s: phone", p.tags.c_str());
+        p.tags = "phone";
+    }
     return p;
 }
 
@@ -68,6 +73,7 @@ BluezOptions bluez_options(const Config& c) {
     b.discoverable_s = c.real("bluetooth.discoverable_s", b.discoverable_s);
     b.central = c.flag("bluetooth.central", b.central);
     b.reconnect_s = c.real("bluetooth.reconnect_s", b.reconnect_s);
+    b.last_phone_file = c.str("bluetooth.last_phone_file", "/data/last-phone");
     return b;
 }
 
@@ -214,23 +220,31 @@ int main(int argc, char** argv) {
         return 2;
     }
     if (cfg.flag("debug", false)) g_log_level = 2;
+    std::string log_file = cfg.str("log.file", "/data/btdisk.log");
+    if (!log_file.empty() && !dump.empty()) log_file.clear();
+    if (!log_file.empty()) log_to_file(log_file, size_t(cfg.num("log.file_kb", 1024)) << 10);
     signal(SIGPIPE, SIG_IGN);
 
     PlayerConfig pc = player_config(cfg);
     ChunkQueue queue;
     std::unique_ptr<Encoder> enc;
     if (pc.format == "mp3")
-        enc = std::make_unique<Mp3Encoder>(queue, pc.rate, pc.channels, cfg.num("audio.mp3_kbps", 320),
+        enc = std::make_unique<Mp3Encoder>(queue, pc.rate, pc.channels, cfg.num("audio.mp3_kbps", 256),
                                            cfg.str("audio.mp3_command", ""));
     else
         enc = std::make_unique<WavEncoder>(queue, pc.rate, pc.channels);
 
-    LiveStream stream(*enc, pc.rate, pc.channels);
+    DriftOptions drift;
+    drift.enabled = cfg.flag("audio.drift_correction", drift.enabled);
+    drift.radio_period_s = cfg.real("audio.drift_period_s", drift.radio_period_s);
+    LiveStream stream(*enc, pc.rate, pc.channels, drift);
     bool live = dump.empty();
     std::unique_ptr<A2dpSink> a2dp;
     if (live && tone <= 0)
         a2dp = std::make_unique<A2dpSink>(stream, cfg.flag("audio.apply_volume", true),
-                                          cfg.num("audio.rt_priority", 30));
+                                          cfg.num("audio.rt_priority", 30),
+                                          cfg.flag("bluetooth.delay_reporting", true)
+                                              ? int(pc.target_latency_s * 1000 + 0.5) : 0);
 
     std::unique_ptr<MediaControl> control;
     Bluez* bluez = nullptr;
