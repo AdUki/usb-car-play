@@ -1,0 +1,61 @@
+#!/bin/sh
+# btdisk-init: the stick's PID 1 (init=/sbin/btdisk-init), instead of systemd. Music should start
+# as soon after power-on as possible, and a stick runs four programs: the USB side (btdisk),
+# D-Bus, bluetoothd and a login on the serial console. They start in that order of urgency, and
+# each is restarted if it exits. systemd stays installed only for its sd-bus library.
+#
+# The root filesystem stays read-only (mounted so by the kernel); /data is the one writable
+# place. Power is cut without warning, so there is nothing to stop. Logs: btdisk keeps its own in
+# /data/btdisk.log; the rest goes to syslogd's RAM buffer (logread).
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+# Runs CMD... again whenever it exits (after a second), in the background.
+respawn() {
+    ( while :; do "$@"; sleep 1; done ) &
+}
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mountpoint -q /dev || mount -t devtmpfs devtmpfs /dev
+mkdir -p /dev/pts /dev/shm
+mount -t devpts -o mode=0620,ptmxmode=0666,gid=5 devpts /dev/pts
+mount -t tmpfs -o mode=0755,nodev,nosuid tmpfs /run
+mount -t tmpfs -o mode=1777,nodev,nosuid tmpfs /tmp
+mount -t tmpfs tmpfs /var/volatile
+mkdir -p /var/volatile/log /var/volatile/tmp /run/lock
+chmod 1777 /var/volatile/tmp
+
+# The Bluetooth controller's driver first: it uploads its firmware patch (about a second) while
+# the rest starts.
+modprobe hci_uart &
+
+# The radio next: it sees the stick while the rest starts. btdisk runs ahead of everything else
+# on the single core (its A2DP reader raises itself to SCHED_FIFO).
+/usr/libexec/btdisk/btdisk-gadget setup
+respawn sh -c 'renice -n -10 -p $$ >/dev/null; exec /usr/bin/btdisk -c /etc/btdisk.conf 2>&1 | logger -t btdisk'
+
+# /var/lib in RAM, filled from the image (D-Bus and BlueZ keep state there), then the pairings
+# from /data on /var/lib/bluetooth.
+mkdir -p /var/volatile/lib
+cp -a /var/lib/. /var/volatile/lib/
+mount --bind /var/volatile/lib /var/lib
+/usr/libexec/btdisk/btdisk-data
+
+# D-Bus needs a machine ID; a read-only image has none of its own.
+if [ ! -s /etc/machine-id ] || grep -q uninitialized /etc/machine-id; then
+    dbus-uuidgen > /run/machine-id
+    mount --bind /run/machine-id /etc/machine-id
+fi
+mkdir -p /run/dbus
+respawn dbus-daemon --system --nofork --nopidfile --syslog-only
+while [ ! -S /run/dbus/system_bus_socket ]; do usleep 20000; done
+# The plugins of the bluez5 bbappend's bluetooth.service drop-in (it logs to syslog itself).
+respawn sh -c 'exec /usr/libexec/bluetooth/bluetoothd -n --noplugin=sap,input,hog,network,midi,neard,wiimote,sixaxis,battery,deviceinfo,scanparam,bap,bass,vcp,mcp,micp,ccp,csip,tmap,gmap,asha,admin,autopair >/dev/null 2>&1'
+
+# What only a person at the serial console needs.
+syslogd -C256
+hostname -F /etc/hostname 2>/dev/null
+respawn /sbin/getty -L 115200 ttyS0 vt100
+
+# PID 1 must reap whatever is orphaned to it, forever.
+while :; do wait; sleep 1; done
