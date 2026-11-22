@@ -12,6 +12,8 @@ void LiveFileData::reset(bool continuous) {
     started_ = false;
     continuous_ = continuous;
     grace_ = 0;
+    silent_ = false;
+    live_ = false;
     if (!continuous) carry_.clear();
     segs_.clear();
     cached_ = 0;
@@ -57,16 +59,18 @@ void LiveFileData::start_live() {
     carry_.clear();
     // Hand the radio exactly target_ of audio ahead of live: what is older is stale, and what is
     // missing is made up with silence (in whole chunks). That fixes the latency at the target,
-    // which is also the delay reported to the phone.
-    size_t dropped = enc_.queue.trim_to(target_);
-    if (dropped) LOGD("start: dropped %zu stale bytes", dropped);
+    // which is also the delay reported to the phone. After Next/Previous, all of it silence.
+    size_t dropped = enc_.queue.trim_to(silent_ ? 0 : target_);
     const Bytes& silence = enc_.silence_chunk();
-    size_t backlog = enc_.queue.backlog();
-    for (size_t pad = 0; backlog + pad + silence.size() <= target_; pad += silence.size()) {
+    size_t backlog = enc_.queue.backlog(), pad = 0;
+    for (; backlog + pad + silence.size() <= target_; pad += silence.size()) {
         if (silence.size() > size_ - watermark_) break;
         append(watermark_, silence);
         watermark_ += uint32_t(silence.size());
     }
+    double br = enc_.byte_rate;
+    LOGT("file start at %u%s: %.2f s dropped, %.2f s live + %.2f s silence",
+         watermark_ - uint32_t(pad), silent_ ? " (silent)" : "", dropped / br, backlog / br, pad / br);
 }
 
 void LiveFileData::read(uint32_t offset, uint8_t* dst, size_t n) {
@@ -116,6 +120,8 @@ void LiveFileData::fill(uint32_t end) {
             // impossible, but never leave the radio hanging.
             underruns_++;
             chunk = enc_.silence_chunk();
+        } else {
+            live_ = true;
         }
         uint32_t room = size_ - watermark_;
         if (chunk.size() > room) {

@@ -19,6 +19,12 @@ public:
 
     // continuous: the next file follows the previous one gaplessly (it ended, nothing skipped).
     void reset(bool continuous = false);
+    // The radio's Next/Previous: the file starts on target_latency_s of silence instead of the
+    // queued audio (the old song's, or the new one cut short by the skip below when the radio
+    // pauses after its first read: the Sony reads 2 KiB, waits a second, then streams).
+    void start_silent() { silent_ = true; }
+    // The radio reads past the start: audio from the live queue, not the silence put first.
+    bool live() const { return live_; }
     // Fills dst with [offset, offset+n) of the data region; blocks until the live stream has
     // produced it (at most max_block_s per chunk, then silence).
     void read(uint32_t offset, uint8_t* dst, size_t n);
@@ -42,6 +48,8 @@ private:
     bool started_ = false;
     bool continuous_ = false;
     size_t grace_ = 0;      // after a gapless switch: backlog that is not stale (see start_live)
+    bool silent_ = false;   // start_silent(), until the next reset
+    bool live_ = false;
     Bytes carry_;           // the end of a chunk that did not fit in the last file: the next one's
     std::map<uint32_t, Bytes> segs_;   // start offset -> contiguous bytes
     size_t cached_ = 0;

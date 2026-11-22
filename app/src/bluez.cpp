@@ -426,10 +426,14 @@ void Bluez::on_props(const std::string& path, const std::string& iface, sd_bus_m
                 }
                 Value v;
                 if (!read_variant(mm, v)) return true;
-                if (k == "Status") p.status = v.s;
-                else if (k == "Device") p.device = v.s;
-                else if (k == "Position" && v.u < 1500 && step_active_ && !step_.restarted)
-                    step_.restarted = now_s();
+                if (k == "Status") {
+                    if (p.status != v.s) LOGT("phone: %s", v.s.c_str());
+                    p.status = v.s;
+                } else if (k == "Device") p.device = v.s;
+                else if (k == "Position") {
+                    LOGT("phone: position %.1f s%s", v.u / 1000.0, step_active_ ? " (switching)" : "");
+                    if (v.u < 1500 && step_active_ && !step_.restarted) step_.restarted = now_s();
+                }
                 return true;
             });
             if (p.device.empty()) p.device = path.substr(0, path.rfind('/'));
@@ -667,6 +671,8 @@ void Bluez::run_commands() {
         } else if (!changed && step_.cmd != "restart") {
             LOGI("bluetooth: the phone did not change track after %s", step_.cmd.c_str());
         }
+        LOGT("phone: %s done after %.2f s (%s)", step_.cmd.c_str(), now - step_.sent,
+             changed ? "new track" : step_.restarted ? "position back at 0" : "deadline");
         step_active_ = false;
     }
     while (!step_active_ && !commands_.empty()) {
@@ -677,7 +683,7 @@ void Bluez::run_commands() {
         if (!method) continue;
         bool step = c == "next" || c == "previous" || c == "restart";
         if (step) {
-            step_ = Step{c, track_.display_name(), now + 1.5, 0, false};
+            step_ = Step{c, track_.display_name(), now + 1.5, 0, false, now};
             step_active_ = true;
         }
         lk.unlock();
@@ -713,6 +719,12 @@ bool Bluez::wait_track_change(uint64_t version, double timeout_s) {
     cv_.wait_for(lk, std::chrono::duration<double>(timeout_s),
                  [&] { return version_ != version && !step_active_ && commands_.empty(); });
     return version_ != version;
+}
+
+bool Bluez::wait_idle(double timeout_s) {
+    std::unique_lock<std::mutex> lk(mu_);
+    return cv_.wait_for(lk, std::chrono::duration<double>(timeout_s),
+                        [&] { return !step_active_ && commands_.empty(); });
 }
 
 std::string Bluez::status() {

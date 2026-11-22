@@ -35,7 +35,7 @@ Bluetooth right now.
 
 ```sh
 make configure && make layers   # once: Yocto caches and pinned layers
-make image                      # read-only image (DEV=1 adds Wi-Fi and ssh)
+make image                      # read-only image (DEV=1 adds Wi-Fi and ssh, TRACE=1 a car log)
 make flash DISK=/dev/sdX
 ```
 
@@ -44,9 +44,12 @@ phone with **Car USB**. No PIN is needed. Every setting is optional and document
 [`config/btdisk.conf`](config/btdisk.conf), which is installed as `/etc/btdisk.conf`.
 After power-on it calls the phone that was connected last, every 5 s for the first 3 minutes.
 
-When something goes wrong in the car, the SD card's data partition keeps the story:
-`btdisk.log` (and `btdisk.log.1`) has what the radio read, what was sent to the phone and the
-Bluetooth connections, from every drive.
+The image writes to the SD card only when a phone pairs or a different one connects (BlueZ's
+pairings and the last phone, on the data partition): the log stays in RAM. To find out what
+goes wrong in the car, build with `make image TRACE=1`: then the data partition keeps the
+story across power cuts. `btdisk.log` (and `.1`) has what the radio read and when it paused,
+what was sent to the phone and how long it took, the muting around it and the Bluetooth
+connections, every drive numbered (`run N`); `syslog.log` has bluetoothd's and the kernel's.
 
 ### Will my radio play it?
 
@@ -64,14 +67,16 @@ out what you pressed from what the radio reads:
 |---|---|
 | a file up to 7 further on (wrapping around) | that many *Next* |
 | a file up to 8 before | that many *Previous* |
-| the start of the current file again | *Previous* (the phone restarts its track); again within 10 s: back a track |
+| the start of the current file again, after `restart_threshold_s` | *Previous* (the phone restarts its track), unless the phone's track only just started |
 | its file again after a pause or another source | nothing: it carries on where it was |
 | nothing for 5 s | *Pause*, then *Play* when reading resumes |
 | tag scans and filesystem probes at mount | nothing |
 
 Several *Next* or *Previous* go one at a time, each after the phone has switched tracks:
 phones drop the ones that come too fast. A *Previous* that only restarted the track is sent
-again.
+again. The new file starts on silence, and the phone stays muted until it has switched and the
+radio streams the file, then fades in: no tail of the old song, and no jump where a radio pauses
+after its first read.
 
 The radio reads ahead of real time. Each file starts exactly 200 ms behind live (trimmed or
 padded with silence), and the phone is told that delay over A2DP delay reporting, so video on the

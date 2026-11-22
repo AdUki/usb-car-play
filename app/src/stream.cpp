@@ -67,6 +67,54 @@ void ChunkQueue::clear() {
     stats_.resets++;
 }
 
+// ------------------------------------------------------------------------------ Encoder
+
+void Encoder::hush(double max_s) {
+    {
+        std::lock_guard<std::mutex> lk(gate_mu_);
+        hushed_ = true;
+        hush_until_ = now_s() + max_s;
+        fade_ = -1;
+    }
+    drop_in_flight();
+}
+
+void Encoder::release(double delay_s) {
+    std::lock_guard<std::mutex> lk(gate_mu_);
+    if (hushed_) hush_until_ = std::min(hush_until_, now_s() + delay_s);
+}
+
+bool Encoder::hushed() const {
+    std::lock_guard<std::mutex> lk(gate_mu_);
+    return hushed_;
+}
+
+void Encoder::write(const uint8_t* pcm, size_t n) {
+    std::unique_lock<std::mutex> lk(gate_mu_);
+    if (hushed_ && now_s() >= hush_until_) {
+        hushed_ = false;
+        fade_ = 0;
+    }
+    if (!hushed_ && fade_ < 0) {
+        lk.unlock();
+        feed(pcm, n);
+        return;
+    }
+    gated_.assign(pcm, pcm + n);
+    int16_t* s = reinterpret_cast<int16_t*>(gated_.data());
+    size_t count = n / 2;
+    if (hushed_) {
+        memset(s, 0, count * 2);
+    } else {
+        for (size_t i = 0; i < count && fade_ >= 0; i++) {
+            s[i] = int16_t(s[i] * (double(fade_) / fade_samples_));
+            if (++fade_ >= fade_samples_) fade_ = -1;
+        }
+    }
+    lk.unlock();
+    feed(gated_.data(), n);
+}
+
 // ------------------------------------------------------------------------------ WAV
 
 WavEncoder::WavEncoder(ChunkQueue& q, int rate, int channels) : Encoder(q) {
@@ -77,6 +125,7 @@ WavEncoder::WavEncoder(ChunkQueue& q, int rate, int channels) : Encoder(q) {
 }
 
 void WavEncoder::feed(const uint8_t* pcm, size_t n) {
+    if (stale_pending_.exchange(false)) std::fill(pending_.begin(), pending_.end(), 0);
     pending_.insert(pending_.end(), pcm, pcm + n);
     size_t whole = pending_.size() / chunk_bytes_ * chunk_bytes_;
     for (size_t i = 0; i < whole; i += chunk_bytes_)
@@ -87,8 +136,9 @@ void WavEncoder::feed(const uint8_t* pcm, size_t n) {
 // ------------------------------------------------------------------------------ MP3
 
 Mp3Encoder::Mp3Encoder(ChunkQueue& q, int rate, int channels, int kbps, const std::string& command)
-    : Encoder(q) {
+    : Encoder(q), channels_(channels) {
     byte_rate = kbps * 1000 / 8;
+    fade_samples_ = channels * 1323;
     silence_ = silent_mp3_frame(kbps, rate, channels == 2);
     std::string cmd = command;
     if (cmd.empty()) {
@@ -140,6 +190,7 @@ void Mp3Encoder::feed(const uint8_t* pcm, size_t n) {
         s[i] = int16_t(std::clamp(v, -32768, 32767));
     }
     pcm = noisy_.data();
+    fed_samples_ += n / (2 * size_t(channels_));
     while (n) {
         ssize_t w = ::write(in_fd_, pcm, n);
         if (w <= 0) { LOGW("mp3 encoder stopped taking input"); return; }
@@ -148,12 +199,21 @@ void Mp3Encoder::feed(const uint8_t* pcm, size_t n) {
     }
 }
 
+void Mp3Encoder::drop_in_flight() {
+    // Output frame k holds input samples from about 1152 k - 576 (lame's encoder delay) on, and
+    // overlaps the frame before: up to two frames past the last sample fed carry the old audio.
+    stale_frames_ = fed_samples_ / 1152 + 2;
+}
+
 void Mp3Encoder::reader() {
     Mp3FrameSplitter split;
     uint8_t buf[4096];
     ssize_t n;
     while ((n = ::read(out_fd_, buf, sizeof buf)) > 0)
-        for (auto& f : split.feed(buf, n)) queue.put(std::move(f));
+        for (auto& f : split.feed(buf, n)) {
+            if (out_frames_++ < stale_frames_) f = silence_;
+            queue.put(std::move(f));
+        }
 }
 
 // ------------------------------------------------------------------------------ LiveStream
@@ -226,9 +286,9 @@ void LiveStream::write_pcm(const uint8_t* data, size_t n) {
         resampled_.clear();
         resampler_.process(reinterpret_cast<const int16_t*>(partial_.data()), whole / frame_bytes_,
                            ratio, resampled_);
-        encoder.feed(reinterpret_cast<const uint8_t*>(resampled_.data()), resampled_.size() * 2);
+        encoder.write(reinterpret_cast<const uint8_t*>(resampled_.data()), resampled_.size() * 2);
     } else {
-        encoder.feed(partial_.data(), whole);
+        encoder.write(partial_.data(), whole);
     }
     partial_.erase(partial_.begin(), partial_.begin() + whole);
 }

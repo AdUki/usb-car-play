@@ -18,6 +18,10 @@ void log_to_file(const std::string& path, size_t max_bytes);   // max_bytes: the
 #define LOGW(...) log_line(0, __VA_ARGS__)
 #define LOGI(...) do { if (g_log_level >= 1) log_line(1, __VA_ARGS__); } while (0)
 #define LOGD(...) do { if (g_log_level >= 2) log_line(2, __VA_ARGS__); } while (0)
+// The detailed car log (log.trace): at info level, only when it is on.
+extern bool g_trace;
+#define LOGT(...) do { if (g_trace) log_line(1, __VA_ARGS__); } while (0)
+const char* btdisk_version();   // the source it was built from (BTDISK_VERSION)
 
 inline double now_s() {
     using namespace std::chrono;

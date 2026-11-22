@@ -6,7 +6,8 @@
 #
 # The root filesystem stays read-only (mounted so by the kernel); /data is the one writable
 # place. Power is cut without warning, so there is nothing to stop. Logs: btdisk keeps its own in
-# /data/btdisk.log; the rest goes to syslogd's RAM buffer (logread).
+# /data/btdisk.log; the rest goes to syslogd's RAM buffer (logread), or with TRACE=1 to
+# /data/syslog.log.
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
 # Runs CMD... again whenever it exits (after a second), in the background.
@@ -40,6 +41,17 @@ mkdir -p /var/volatile/lib
 cp -a /var/lib/. /var/volatile/lib/
 mount --bind /var/volatile/lib /var/lib
 /usr/libexec/btdisk/btdisk-data
+# make image TRACE=1 (log.trace in btdisk.conf): the system log (bluetoothd, the kernel's through
+# klogd, btdisk's stderr) goes to /data too, kept across power cuts like btdisk's own log. From
+# here on, as early as /data is there. Otherwise it is a RAM buffer (logread), started below.
+# (syslogd and klogd are busybox applets without links of their own on the image.)
+SYSLOG_TO_DATA=
+if grep -q '^trace *= *true' /etc/btdisk.conf 2>/dev/null && mountpoint -q /data; then
+    SYSLOG_TO_DATA=1
+    busybox syslogd -O /data/syslog.log -s 2048 -b 1
+    busybox klogd
+    logger -t btdisk-init "==== boot: $(cat /proc/uptime) ===="
+fi
 
 # D-Bus needs a machine ID; a read-only image has none of its own.
 if [ ! -s /etc/machine-id ] || grep -q uninitialized /etc/machine-id; then
@@ -53,7 +65,7 @@ while [ ! -S /run/dbus/system_bus_socket ]; do usleep 20000; done
 respawn sh -c 'exec /usr/libexec/bluetooth/bluetoothd -n --noplugin=sap,input,hog,network,midi,neard,wiimote,sixaxis,battery,deviceinfo,scanparam,bap,bass,vcp,mcp,micp,ccp,csip,tmap,gmap,asha,admin,autopair >/dev/null 2>&1'
 
 # What only a person at the serial console needs.
-syslogd -C256
+[ -n "$SYSLOG_TO_DATA" ] || busybox syslogd -C256
 hostname -F /etc/hostname 2>/dev/null
 respawn /sbin/getty -L 115200 ttyS0 vt100
 

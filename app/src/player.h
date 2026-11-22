@@ -4,7 +4,7 @@
 // How the radio's buttons show up as reads:
 //   Next        reads of file k+1 while file k was playing
 //   Previous    reads of file k-1, or of the start of file k again (most radios restart a
-//               track that has played more than a few seconds)
+//               track that has played more than a few seconds: restart_threshold_s)
 //   pause, off  no reads for a while
 //   mount       boot sector, FAT and directory reads, often a tag scan of several files:
 //               no commands during that (the guard window)
@@ -15,8 +15,10 @@
 #include "livefile.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <thread>
 
 // What the player needs from the phone side; bluez.h implements it.
 class MediaControl {
@@ -25,6 +27,8 @@ public:
     virtual TrackInfo track() = 0;
     virtual uint64_t track_version() = 0;            // changes whenever track() does
     virtual bool wait_track_change(uint64_t version, double timeout_s) = 0;
+    // Until the Next/Previous sent so far are all carried out (or given up on); false on timeout.
+    virtual bool wait_idle(double timeout_s) { (void)timeout_s; return true; }
     virtual std::string status() = 0;                // playing, paused, stopped, ...
     virtual bool connected() = 0;
     virtual void command(const std::string& cmd) = 0;  // next previous play pause
@@ -56,7 +60,18 @@ struct PlayerConfig {
     double guard_s = 6.0;            // no commands this long after a mount
     double metadata_wait_s = 1.5;    // hold the header read until the phone names the new track
     bool restart_is_previous = true;
-    double restart_threshold_s = 3.0;
+    // The radio's own: its Previous restarts a track that has played this long (the Sony: about
+    // 5 s), and goes to the file before when it has played less. A read of the file's start
+    // after less is something else (a look at the first frames).
+    double restart_threshold_s = 5.0;
+    // The phone's: its Previous restarts a song this far in (YouTube Music, Spotify: 3 s) and goes
+    // back a song before. A radio restart this soon after the phone's song started gets nothing.
+    double phone_restart_s = 3.0;
+    // After Next/Previous the new file starts on silence, and the phone stays silent until it
+    // says it has switched (and this long after: the old song's last packets) and the radio
+    // streams the file; then it fades in. None of the old song, no jump at the start.
+    bool skip_mute = true;
+    double skip_mute_s = 0.3;
     double pause_after_s = 5.0;      // 0: don't pause the phone when the radio stops reading
     bool autoplay = false;           // Play when the radio reads and the phone is paused
     std::string tags = "phone";      // what the tags say: "phone" (its name) or "track"
@@ -65,6 +80,7 @@ struct PlayerConfig {
 class Player {
 public:
     Player(const PlayerConfig& cfg, Encoder& enc, MediaControl& control);
+    ~Player();
 
     std::vector<VirtualFile> make_files();
     void read_file(int i, uint32_t offset, uint8_t* dst, size_t n);
@@ -87,6 +103,9 @@ private:
     double pause_threshold() const;          // no reads this long: the radio is away
     void switch_to(int i, bool continuous = false);
     void send_and_wait(const std::vector<std::string>& cmds);
+    void hush_until_switched(size_t steps, bool restart = false);   // see skip_mute
+    void watch_loop();                       // unmutes when the phone has switched
+    void trace_reads(const char* why);       // log.trace: the radio's reads of the last seconds
     void command(const std::string& c);
     void note_data_read(double now);
     Bytes header(const TrackInfo& t) const;
@@ -118,7 +137,20 @@ private:
     bool restart_pending_ = false;           // the current file read again at its start
     bool restart_away_ = false;              // ... when the radio came back from elsewhere
     uint64_t restart_next_ = 0;
-    double last_restart_ = -1e9;
+    std::atomic<double> phone_switched_at_{-1e9};   // when the phone's song last started over
+    // The mute after Next/Previous ends when both the phone has switched and the radio streams.
+    std::atomic<double> phone_done_at_{0};          // 0: still switching
+    std::atomic<bool> radio_live_{true};
+    struct ReadRec { double t; int file; uint32_t off, n; };
+    std::vector<ReadRec> reads_;                    // log.trace: a ring of the last reads
+    size_t reads_at_ = 0;
+    std::thread watch_;
+    std::mutex watch_mu_;
+    std::condition_variable watch_cv_;
+    uint64_t watch_gen_ = 0, watched_gen_ = 0;   // commands sent / seen carried out
+    double watch_t0_ = 0, watch_max_ = 0;
+    bool watch_restart_ = false;
+    bool watch_stop_ = false;
     int trace_file_ = -1;                    // the log's read trace: where the last read ended
     uint64_t trace_next_ = 0;
     double last_read_ = 0;

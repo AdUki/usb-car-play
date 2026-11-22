@@ -22,7 +22,8 @@ S = "${WORKDIR}/app"
 
 inherit cmake systemd pkgconfig
 
-EXTRA_OECMAKE = "-DCMAKE_BUILD_TYPE=Release -DBTDISK_TESTS=OFF -DBTDISK_TOOLS=OFF -DBTDISK_ALL_CODECS=ON"
+EXTRA_OECMAKE = "-DCMAKE_BUILD_TYPE=Release -DBTDISK_TESTS=OFF -DBTDISK_TOOLS=OFF -DBTDISK_ALL_CODECS=ON \
+                 -DBTDISK_VERSION=${BTDISK_VERSION}"
 
 # file://app copies the working tree as it is, local build directories included.
 do_configure:prepend() {
@@ -33,6 +34,14 @@ do_install:append() {
     install -d ${D}${libexecdir}/btdisk ${D}${sysconfdir} ${D}${systemd_system_unitdir}
     install -m 0755 ${WORKDIR}/scripts/btdisk-gadget ${D}${libexecdir}/btdisk/
     install -m 0644 ${WORKDIR}/config/btdisk.conf ${D}${sysconfdir}/
+    # make image TRACE=1: the detailed log, with room for a whole drive of it (btdisk-init then
+    # keeps the system log in /data as well).
+    if [ "${BTDISK_TRACE}" = "1" ]; then
+        sed -i -e 's/^trace = false/trace = true/' -e 's/^file_kb = .*/file_kb = 3072/' \
+            -e 's|^file =.*|file = /data/btdisk.log|' ${D}${sysconfdir}/btdisk.conf
+        grep -q '^trace = true' ${D}${sysconfdir}/btdisk.conf && grep -q '^file = /data/btdisk.log' \
+            ${D}${sysconfdir}/btdisk.conf || bbfatal "btdisk.conf: no trace or file key to set"
+    fi
     install -m 0644 ${WORKDIR}/btdisk.service ${D}${systemd_system_unitdir}/
 }
 

@@ -40,21 +40,29 @@ struct SimPhone : MediaControl {
         std::unique_lock<std::mutex> lk(mu);
         return cv.wait_for(lk, std::chrono::duration<double>(t), [&] { return version != v; });
     }
+    bool wait_idle(double t) override {
+        std::unique_lock<std::mutex> lk(mu);
+        return cv.wait_for(lk, std::chrono::duration<double>(t), [&] { return pending == 0; });
+    }
     std::string status() override { return "playing"; }
     bool connected() override { return true; }
     void command(const std::string& c) override {
         { std::lock_guard<std::mutex> lk(mu); sent.push_back(c); }
         if (c != "next" && c != "previous") return;
         int step = c == "next" ? 1 : -1;
-        // A phone takes a moment to switch tracks and report the new one.
+        // A phone takes a moment to switch tracks and report the new one, and its old track
+        // plays on until then.
+        { std::lock_guard<std::mutex> lk(mu); pending++; }
         std::thread([this, step] {
             usleep(250000);
             std::lock_guard<std::mutex> lk(mu);
             index += step;
             version++;
+            pending--;
             cv.notify_all();
         }).detach();
     }
+    int pending = 0;
     double freq() { std::lock_guard<std::mutex> lk(mu); return 440.0 * (1 + 0.25 * index); }
 };
 
@@ -72,8 +80,9 @@ public:
         : fs_(fs), files_(std::move(files)), chunk_(chunk), buffer_(buffer), start_(start),
           rate_(44100 * (1 + clock_ppm * 1e-6)) {}
 
-    // Opens file i and plays it for `seconds` of wall time.
-    Segment play(int i, double seconds, std::string& header_text) {
+    // Opens file i and plays it for `seconds` of wall time. sony: the way the car's Sony opens a
+    // file (its log): the header, 2 s nothing, 2 KiB of audio, a second nothing, then on.
+    Segment play(int i, double seconds, std::string& header_text, bool sony = false) {
         const FoundFile& f = files_[i];
         Bytes hdr = fs_.read_file(f, 0, 4096);
         header_text.assign(hdr.begin(), hdr.end());
@@ -87,6 +96,12 @@ public:
         Segment seg;
         Bytes buffer;
         uint32_t pos = data_off;
+        if (sony) {
+            usleep(2000000);
+            buffer = fs_.read_file(f, pos, 2048);
+            pos += 2048;
+            usleep(900000);
+        }
         bool playing = false;
         double t_start = now_s(), t_last = 0;
         double played_frames = 0;
@@ -263,6 +278,8 @@ int run_radio_sim() {
     cfg.guard_s = 1.0;
     cfg.metadata_wait_s = 1.0;
     cfg.pause_after_s = 0;
+    cfg.restart_threshold_s = 3;     // this radio restarts a track 3 s in
+    if (getenv("SKIP_MUTE_OFF")) cfg.skip_mute = false;
     Player player(cfg, enc, phone);
     FatVolume vol(player.make_files(), FatOptions{});
     ScsiDisk disk(vol, "Generic", "USB Flash Disk", "0123456789AB", false);
@@ -324,6 +341,13 @@ int run_radio_sim() {
     CHECK(hdr.find("Song 1") != std::string::npos);
     double f2 = frequency(s2.left, s2.left.size() - 44100, 44100);
     CHECK(std::fabs(f2 - 550) < 5);
+    // None of the old track at the new file's start: what was queued of it, and what the phone
+    // sent until it switched, are gone. The new one comes in where the sound does.
+    size_t onset2 = 0;
+    while (onset2 < s2.left.size() && std::abs(s2.left[onset2]) < 1000) onset2++;
+    double f2_start = frequency(s2.left, onset2, 4410);
+    CHECK(std::fabs(f2_start - 550) < 30);
+    double gap2 = onset2 / 44100.0;
     int clicks2 = clicks(s2.left, s2.left.size() / 2);
     CHECK_EQ(clicks2, 0);
 
@@ -334,18 +358,33 @@ int run_radio_sim() {
     double f3 = frequency(s3.left, s3.left.size() - 44100, 44100);
     CHECK(std::fabs(f3 - 550) < 5);
 
+    // Next on a radio like the Sony: it reads 64 ms of the new file, pauses a second and goes on,
+    // which btdisk bridges by skipping ahead to live. The file starts in silence and the new
+    // song fades in: no old song, no jump, no click from the first sample on.
+    Segment s4 = radio.play(2, 6.0, hdr, true);
+    size_t onset4 = 0;
+    while (onset4 < s4.left.size() && std::abs(s4.left[onset4]) < 1000) onset4++;
+    double f4_start = frequency(s4.left, onset4, 4410);
+    double f4 = frequency(s4.left, s4.left.size() - 44100, 44100);
+    int clicks4 = clicks(s4.left, 0);
+    CHECK(std::fabs(f4_start - 660) < 30);
+    CHECK(std::fabs(f4 - 660) < 5);
+    CHECK_EQ(clicks4, 0);
+    double gap4 = onset4 / 44100.0;
+
     std::string sent;
     {
         std::lock_guard<std::mutex> lk(phone.mu);
         for (auto& c : phone.sent) sent += (sent.empty() ? "" : ",") + c;
     }
-    CHECK_EQ(sent, std::string("next,restart"));
+    CHECK_EQ(sent, std::string("next,restart,next"));
     CHECK_EQ(under1, 0);
     CHECK_EQ(radio.underruns, 0);
 
-    printf("radio sim: latency %.2f s, %.0f/%.0f/%.0f Hz, underruns %d (%.2f s), "
-           "dropped %.2f s, commands [%s], FAT sector reads %u: %s\n",
-           latency, f1, f2, f3, radio.underruns, radio.underrun_s,
+    printf("radio sim: latency %.2f s, %.0f/%.0f/%.0f Hz, after Next %.2f s silence then %.0f Hz, "
+           "Sony-like Next %.2f s silence then %.0f Hz with %d clicks, "
+           "underruns %d (%.2f s), dropped %.2f s, commands [%s], FAT sector reads %u: %s\n",
+           latency, f1, f2, f3, gap2, f2_start, gap4, f4_start, clicks4, radio.underruns, radio.underrun_s,
            double(q.dropped_total()) / enc.byte_rate, sent.c_str(), fs.fat_reads,
            g_failures == failures_before ? "ok" : "FAILED");
     stop = true;

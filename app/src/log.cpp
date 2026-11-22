@@ -5,6 +5,12 @@
 #include <sys/stat.h>
 
 int g_log_level = 1;
+bool g_trace = false;
+
+#ifndef BTDISK_VERSION
+#define BTDISK_VERSION "dev"
+#endif
+const char* btdisk_version() { return BTDISK_VERSION; }
 
 namespace {
 std::mutex g_file_mu;
@@ -25,8 +31,20 @@ static void open_file_locked() {
     if (!g_file) return;
     struct stat st;
     g_size = fstat(fileno(g_file), &st) == 0 ? size_t(st.st_size) : 0;
-    // No real-time clock: lines carry seconds since start, a start line separates the runs.
-    fprintf(g_file, "==== btdisk start ====\n%s", g_early.c_str());
+    // No real-time clock: lines carry seconds since start, a start line separates the runs,
+    // numbered (one per power-on, kept next to the log) so a drive can be found again.
+    int run = 0;
+    std::string run_path = g_path + ".run";
+    if (FILE* f = fopen(run_path.c_str(), "r")) {
+        if (fscanf(f, "%d", &run) != 1) run = 0;
+        fclose(f);
+    }
+    run++;
+    if (FILE* f = fopen(run_path.c_str(), "w")) {
+        fprintf(f, "%d\n", run);
+        fclose(f);
+    }
+    fprintf(g_file, "==== btdisk start: run %d, %s ====\n%s", run, BTDISK_VERSION, g_early.c_str());
     g_size += g_early.size();
     g_early.clear();
     g_early.shrink_to_fit();

@@ -37,6 +37,7 @@ public:
     TrackInfo track() override;
     uint64_t track_version() override;
     bool wait_track_change(uint64_t version, double timeout_s) override;
+    bool wait_idle(double timeout_s) override;
     std::string status() override;
     bool connected() override;
     void command(const std::string& cmd) override;
@@ -109,6 +110,7 @@ private:
         double deadline = 0;
         double restarted = 0;      // when the phone reported its position back at 0
         bool retried = false;
+        double sent = 0;
     };
     Step step_;
     bool step_active_ = false;

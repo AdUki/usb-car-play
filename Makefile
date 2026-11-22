@@ -4,7 +4,7 @@
 #   make test         unit tests + the real-time radio simulation, on this PC
 #   make check-image  the virtual disk through fsck.fat and 7-Zip
 #   make cross        build for the Pi Zero W with the image's SDK
-#   make image        the read-only Yocto image (DEV=1: with Wi-Fi and ssh)
+#   make image        the read-only Yocto image (DEV=1: with Wi-Fi and ssh, TRACE=1: detailed log)
 #   make flash DISK=/dev/sdX
 #   make bench-test   end to end on the bench's Pi Zero W (dummy_hcd host, a fake phone)
 #
@@ -29,6 +29,10 @@ include $(YOCTO)/boards/$(BOARD).mk
 YB     := $(YOCTO)/build-$(BOARD)
 DEPLOY := $(YB)/tmp/deploy/images/$(MACHINE)
 DEV    ?=
+# TRACE=1: the image logs what the radio and the phone do in detail (log.trace), for a car test.
+TRACE  ?=
+# Which source the image's btdisk was built from: in the log's start line.
+VERSION := $(shell git describe --always --dirty 2>/dev/null || echo unknown)$(if $(shell git status --porcelain 2>/dev/null),-$(shell date +%m%d%H%M))
 IMAGE  := btdisk-image
 BB      = set -e && export MACHINE=$(MACHINE) && \
           . $(LAYERS)/poky/oe-init-build-env $(CURDIR)/$(YB) >/dev/null &&
@@ -144,7 +148,7 @@ $(YB)/conf/bblayers.conf: $(YOCTO)/conf/bblayers.conf.sample
 build-conf: $(YB)/conf/bblayers.conf
 	@[ -f $(YB)/conf/local.conf ] || cp $(YOCTO)/conf/local.conf.sample $(YB)/conf/local.conf
 	@[ -f $(YB)/conf/site.conf ] || [ ! -f $(YOCTO)/conf/site.conf ] || ln -sf ../../conf/site.conf $(YB)/conf/site.conf
-	@printf '# Written by the Makefile for BOARD=$(BOARD) DEV=$(DEV).\nrequire $(CURDIR)/$(YOCTO)/conf/boards/$(BOARD).conf\nBTDISK_DEV = "$(if $(DEV),1,0)"\n' > $(YB)/conf/auto.conf.new
+	@printf '# Written by the Makefile for BOARD=$(BOARD) DEV=$(DEV) TRACE=$(TRACE).\nrequire $(CURDIR)/$(YOCTO)/conf/boards/$(BOARD).conf\nBTDISK_DEV = "$(if $(DEV),1,0)"\nBTDISK_TRACE = "$(if $(TRACE),1,0)"\nBTDISK_VERSION = "$(VERSION)"\n' > $(YB)/conf/auto.conf.new
 	@cmp -s $(YB)/conf/auto.conf.new $(YB)/conf/auto.conf && rm $(YB)/conf/auto.conf.new || mv $(YB)/conf/auto.conf.new $(YB)/conf/auto.conf
 
 .PHONY: configure
@@ -154,12 +158,13 @@ configure: ## Point the Yocto caches at shared directories (DL=, SSTATE=), writt
 	@cat $(YOCTO)/conf/site.conf
 
 .PHONY: image
-image: build-conf ## Build the read-only image (DEV=1: the development variant with Wi-Fi and ssh)
+image: build-conf ## Build the read-only image (DEV=1: with Wi-Fi and ssh; TRACE=1: detailed log in /data)
 	@# By process name, so the check never matches its own shell's command line.
 	@if ps -eo comm=,args= | awk '$$1 ~ /^(bitbake|bitbake-server|python3)$$/ && /bitbake/ {f=1} END {exit !f}'; then \
 	  echo "Another bitbake is running: one Yocto build at a time."; exit 1; fi
 	@$(BB) bitbake $(IMAGE)
 	@ls -la $(DEPLOY)/$(IMAGE)-$(MACHINE).rootfs.wic.bz2
+	@echo "btdisk $(VERSION)$(if $(TRACE), with the detailed log (TRACE=1))$(if $(DEV), DEV)"
 
 .PHONY: sdk
 sdk: build-conf ## Build and install the SDK the cross build uses (yocto/sdk/$(BOARD))
@@ -191,4 +196,4 @@ help:
 	@awk 'BEGIN {FS = ":.*## "} \
 	     /^## ─/ { gsub(/## /,""); printf "\n\033[2m%s\033[0m\n", $$0; next } \
 	     /^[a-zA-Z_-]+:.*?## / { printf "  \033[1m%-14s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
-	@echo -e "\n$(DIM)Vars:  BOARD=$(BOARD)  DEV=1  TARGET=$(TARGET)  BENCH=$(BENCH)  DISK=/dev/sdX  SDK=dir  LAYER_MIRROR=dir$(OFF)\n"
+	@echo -e "\n$(DIM)Vars:  BOARD=$(BOARD)  DEV=1  TRACE=1  TARGET=$(TARGET)  BENCH=$(BENCH)  DISK=/dev/sdX  SDK=dir  LAYER_MIRROR=dir$(OFF)\n"

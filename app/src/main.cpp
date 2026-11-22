@@ -56,6 +56,9 @@ PlayerConfig player_config(const Config& c) {
     p.metadata_wait_s = c.num("player.metadata_wait_ms", 1500) / 1000.0;
     p.restart_is_previous = c.flag("player.restart_is_previous", p.restart_is_previous);
     p.restart_threshold_s = c.real("player.restart_threshold_s", p.restart_threshold_s);
+    p.phone_restart_s = c.real("player.phone_restart_s", p.phone_restart_s);
+    p.skip_mute = c.flag("player.skip_mute", p.skip_mute);
+    p.skip_mute_s = c.num("player.skip_mute_ms", 300) / 1000.0;
     p.pause_after_s = c.real("player.pause_after_s", p.pause_after_s);
     p.autoplay = c.flag("player.autoplay", p.autoplay);
     p.tags = c.str("player.tags", p.tags);
@@ -220,12 +223,19 @@ int main(int argc, char** argv) {
         return 2;
     }
     if (cfg.flag("debug", false)) g_log_level = 2;
-    std::string log_file = cfg.str("log.file", "/data/btdisk.log");
+    std::string log_file = cfg.str("log.file", "");
+    g_trace = cfg.flag("log.trace", false);
     if (!log_file.empty() && !dump.empty()) log_file.clear();
     if (!log_file.empty()) log_to_file(log_file, size_t(cfg.num("log.file_kb", 1024)) << 10);
     signal(SIGPIPE, SIG_IGN);
 
     PlayerConfig pc = player_config(cfg);
+    LOGI("btdisk %s: %s%s, %d files, latency %.0f ms, restart_threshold_s %.1f, phone_restart_s %.1f, "
+         "skip_mute %s %.0f ms, pause_after_s %.1f, tags %s, codecs %s%s", btdisk_version(),
+         pc.format.c_str(), pc.format == "mp3" ? (" " + std::to_string(cfg.num("audio.mp3_kbps", 256)) + " kbps").c_str() : "",
+         pc.files, pc.target_latency_s * 1000, pc.restart_threshold_s, pc.phone_restart_s,
+         pc.skip_mute ? "on" : "off", pc.skip_mute_s * 1000, pc.pause_after_s, pc.tags.c_str(),
+         cfg.str("bluetooth.codecs", kDefaultCodecs).c_str(), g_trace ? ", trace" : "");
     ChunkQueue queue;
     std::unique_ptr<Encoder> enc;
     if (pc.format == "mp3")
@@ -273,9 +283,17 @@ int main(int argc, char** argv) {
     disk.on_mount = [&] { player.on_mount(); };
 
     std::thread([&] {
-        while (true) {
+        for (int n = 1;; n++) {
             sleep(1);
             player.tick();
+            // The trace's heartbeat: where the radio is and how the stream keeps up.
+            if (g_trace && n % 10 == 0)
+                LOGT("state: file %d at %.1f s, backlog %.2f s, underruns %u, skips %u, %s, "
+                     "phone %s, clocks %+.0f/%+.0f ppm", player.current() + 1,
+                     double(player.data().watermark()) / enc->byte_rate,
+                     double(queue.backlog()) / enc->byte_rate, player.data().underruns(),
+                     player.data().skips(), stream.source_active() ? "audio" : "no audio",
+                     control->status().c_str(), stream.phone_ppm(), stream.radio_ppm());
         }
     }).detach();
     // USB first, Bluetooth after: the radio enumerates the stick while BlueZ is still coming up.

@@ -7,6 +7,8 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 add_compile_options(-Wall -Wextra -Wno-unused-parameter)
+# The source the build came from, in the log's start line (the image's recipe sets it).
+set(BTDISK_VERSION "dev" CACHE STRING "btdisk's version in the log")
 
 find_package(PkgConfig REQUIRED)
 # sd-bus, for BlueZ's D-Bus API (the phone's player, pairing, reconnects). The image runs
@@ -41,6 +43,7 @@ add_library(btdisk_core STATIC
   src/scsi.cpp
   src/stream.cpp)
 target_include_directories(btdisk_core PUBLIC src)
+target_compile_definitions(btdisk_core PRIVATE BTDISK_VERSION="${BTDISK_VERSION}")
 target_link_libraries(btdisk_core PUBLIC PkgConfig::SYSTEMD PkgConfig::SBC Threads::Threads)
 if(FDKAAC_FOUND)
   target_compile_definitions(btdisk_core PUBLIC BTDISK_AAC)

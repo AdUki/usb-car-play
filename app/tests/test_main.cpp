@@ -311,20 +311,6 @@ static void test_player() {
         CHECK_EQ(r.phone.sent_str(), std::string("previous,previous"));
         r.phone.clear();
 
-        r.play(1, 5);                      // restart of the same file after 5 s: Previous
-        r.read(1, 0, 512);                 // (the start, and on from there)
-        CHECK_EQ(r.phone.sent_str(), std::string(""));
-        r.read(1, 512, 65536);
-        CHECK_EQ(r.phone.sent_str(), std::string("restart"));
-        r.phone.clear();
-        r.read(1, 0, 512);                 // the header again right away: not another restart
-        CHECK_EQ(r.phone.sent_str(), std::string(""));
-        r.play(1, 4);                      // restarted again soon: back a track
-        r.read(1, 0, 512);
-        r.read(1, 512, 65536);
-        CHECK_EQ(r.phone.sent_str(), std::string("previous"));
-        r.phone.clear();
-
         r.play(1, 1);
         r.read(0, 44, 4096);
         r.phone.clear();
@@ -333,6 +319,82 @@ static void test_player() {
         r.phone.clear();
         r.read(0, 0, 512);                 // file 8 -> file 1: wraps forwards
         CHECK_EQ(r.phone.sent_str(), std::string("next"));
+    }
+    {
+        // The radio restarts its file (Previous after restart_threshold_s): the phone restarts
+        // its song, with one Previous.
+        PlayerRig r;
+        r.cfg.phone_restart_s = 1.0;
+        r.cfg.pause_after_s = 0;           // the pauses below are not the radio away
+        r.cfg.max_block_s = 0.0005;        // (reads fast: the waits below are the timeline)
+        r.player = std::make_unique<Player>(r.cfg, r.enc, r.phone);
+        r.play(1, 6);
+        r.read(1, 0, 512);                 // the start, and on from there
+        CHECK_EQ(r.phone.sent_str(), std::string(""));
+        r.read(1, 512, 65536);
+        CHECK_EQ(r.phone.sent_str(), std::string("restart"));
+        r.phone.clear();
+        r.read(1, 0, 512);                 // the header again right away: not another restart
+        CHECK_EQ(r.phone.sent_str(), std::string(""));
+
+        // A radio with a track picker: the file opened again soon after (the picker's timeout).
+        // The phone's song has only just restarted: another Previous would take it back a song.
+        r.play(1, 6);
+        r.read(1, 0, 512);
+        r.read(1, 512, 65536);
+        r.read(1, 512 + 65536, 65536);
+        CHECK_EQ(r.phone.sent_str(), std::string(""));
+        CHECK(r.player->data().watermark() < 3 * 65536);    // live again from the start
+        auto ev = r.player->events();
+        CHECK(std::any_of(ev.begin(), ev.end(), [](auto& e) { return e.find("nothing to send") != std::string::npos; }));
+
+        // The start read again before the radio's restart threshold: a look at the first frames.
+        usleep(1100000);
+        r.play(1, 2);
+        r.read(1, 44, 65536);
+        r.read(1, 44 + 65536, 65536);
+        CHECK_EQ(r.phone.sent_str(), std::string(""));
+
+        // Later, a restart again: Previous again (never two, which would be back a song).
+        r.play(1, 6);
+        r.read(1, 44, 65536);
+        r.read(1, 44 + 65536, 65536);
+        CHECK_EQ(r.phone.sent_str(), std::string("restart"));
+    }
+    {
+        // Next: the new file has none of the old song, neither what was queued nor what the
+        // phone sends until it has switched; then the new song fades in.
+        PlayerRig r;
+        r.cfg.skip_mute_s = 0.05;
+        r.player = std::make_unique<Player>(r.cfg, r.enc, r.phone);
+        auto tone = [](int16_t v, double s) { return std::vector<int16_t>(size_t(s * 44100) / 1152 * 1152 * 2, v); };
+        auto write = [&](const std::vector<int16_t>& pcm) {
+            r.enc.write(reinterpret_cast<const uint8_t*>(pcm.data()), pcm.size() * 2);
+        };
+        r.play(0, 3);
+        write(tone(1000, 0.5));            // the old song, queued
+        r.read(1, 0, 44);                  // Next
+        CHECK_EQ(r.phone.sent_str(), std::string("next"));
+        CHECK(r.enc.hushed());
+        write(tone(1000, 0.2));            // the old song still coming: muted
+        Bytes start = r.read(1, 44, uint32_t(0.4 * 176400) / 4 * 4);
+        CHECK(std::all_of(start.begin(), start.end(), [](uint8_t b) { return b == 0; }));
+        usleep(150000);                    // the phone switched, and skip_mute_s passed
+        write(tone(2000, 0.1));            // but the radio has not streamed the file yet: muted
+        CHECK(r.enc.hushed());
+        Bytes streams = r.read(1, 44 + uint32_t(start.size()), uint32_t(0.1 * 176400) / 4 * 4);
+        CHECK(std::all_of(streams.begin(), streams.end(), [](uint8_t b) { return b == 0; }));
+        write(tone(2000, 0.3));            // it does now: the new song fades in, then as it is
+        CHECK(!r.enc.hushed());
+        Bytes next = r.read(1, 44 + uint32_t(start.size() + streams.size()), uint32_t(0.3 * 176400) / 4 * 4);
+        auto at = [&](size_t frame) { return int16_t(get_le16(&next[frame * 4])); };
+        size_t first = 0;
+        while (first < next.size() / 4 && at(first) == 0) first++;
+        CHECK(first < next.size() / 4);
+        CHECK(at(first) > 0 && at(first) < 200);            // the fade's first steps
+        bool rest = true;                                   // after 30 ms: all of the new song
+        for (size_t k = first + 1323; k < next.size() / 4; k++) rest &= at(k) == 2000;
+        CHECK(rest);
     }
     {
         // The metadata in the header is the phone's new track, even when the phone is slow.

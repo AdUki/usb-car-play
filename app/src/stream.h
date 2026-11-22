@@ -9,6 +9,7 @@
 #include "common.h"
 #include "drift.h"
 
+#include <atomic>
 #include <condition_variable>
 #include <deque>
 #include <mutex>
@@ -42,11 +43,33 @@ public:
     explicit Encoder(ChunkQueue& q) : queue(q) {}
     virtual ~Encoder() = default;
     virtual void feed(const uint8_t* pcm, size_t n) = 0;   // s16le interleaved
+    // The phone's audio: fed through the gate below (silence while hushed, then a fade-in).
+    void write(const uint8_t* pcm, size_t n);
     virtual const Bytes& silence_chunk() const = 0;
     // A chunk may be cut at multiples of this (one PCM frame); 0: only whole chunks (MP3 frames).
     virtual size_t split_bytes() const { return 0; }
+
+    // While the phone changes track it still sends the old one for a moment, and the encoder
+    // holds what it sent before: the radio would play the old song's tail at the start of the
+    // new file. hush() silences the phone's audio from now on, and what is still inside the
+    // encoder, for at most max_s. release() fades the phone back in after delay_s.
+    void hush(double max_s);
+    void release(double delay_s);
+    bool hushed() const;
+
     uint32_t byte_rate = 0;                                  // encoded bytes per second
     ChunkQueue& queue;
+
+protected:
+    virtual void drop_in_flight() {}     // audio fed but not yet in the queue becomes silence
+    int fade_samples_ = 2 * 1323;        // the fade-in: 30 ms of stereo 44.1 kHz
+
+private:
+    mutable std::mutex gate_mu_;
+    bool hushed_ = false;
+    double hush_until_ = 0;
+    int fade_ = -1;                      // samples into the fade-in; -1: none
+    Bytes gated_;
 };
 
 class WavEncoder : public Encoder {
@@ -56,8 +79,10 @@ public:
     const Bytes& silence_chunk() const override { return silence_; }
     size_t split_bytes() const override { return frame_bytes_; }
 private:
+    void drop_in_flight() override { stale_pending_ = true; }
     size_t chunk_bytes_, frame_bytes_;
     Bytes pending_, silence_;
+    std::atomic<bool> stale_pending_{false};
 };
 
 // CBR MP3 through an external encoder process (lame by default). Expensive on a Zero W: WAV
@@ -70,10 +95,16 @@ public:
     const Bytes& silence_chunk() const override { return silence_; }
 private:
     void reader();
+    void drop_in_flight() override;
     int in_fd_ = -1, out_fd_ = -1, pid_ = -1;
+    int channels_;
     std::thread reader_;
     Bytes silence_, noisy_;
     uint32_t noise_ = 0x12345678;
+    // Frames go in and out of lame one for one (1152 samples, no tag frame): the ones that
+    // carry samples fed before a hush come out as silence.
+    std::atomic<uint64_t> fed_samples_{0}, stale_frames_{0};
+    uint64_t out_frames_ = 0;
 };
 
 struct DriftOptions {
