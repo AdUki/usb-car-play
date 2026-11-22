@@ -17,6 +17,14 @@
 #include <cmath>
 #include <sbc/sbc.h>
 #include <sys/socket.h>
+#ifdef BTDISK_AAC
+#include <fdk-aac/aacenc_lib.h>
+#endif
+#ifdef BTDISK_APTX
+extern "C" {   // the header has no extern "C" of its own
+#include <freeaptx.h>
+}
+#endif
 
 int g_failures = 0;
 int run_radio_sim();
@@ -613,38 +621,129 @@ static void test_player() {
     }
 }
 
-// A phone's A2DP stream in miniature: RTP packets of SBC frames (libsbc, joint stereo, bitpool
-// 53, 5 frames a packet) through a SEQPACKET socket, like the L2CAP socket BlueZ hands over.
-// With timestamps the RTP header counts samples like a phone's; without, it stays 0.
-static std::vector<int16_t> a2dp_roundtrip(int volume, int drop_packet, bool timestamps = false) {
-    int sv[2];
-    socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv);
-    const Bytes config = {0x21, 0x15, 2, 53};
-    std::thread phone([&] {
+// A phone's A2DP stream in miniature: two seconds of a 1 kHz sine encoded as a phone sends it.
+// SBC: RTP packets of 5 frames (libsbc, joint stereo, bitpool 53). AAC: one LATM frame with its
+// StreamMuxConfig per RTP packet (fdk-aac, set up like PipeWire's encoder). aptX: 150 codewords
+// (600 samples) a packet, no RTP header. aptX HD: 120 codewords after an RTP header. With
+// timestamps the RTP header counts samples like a phone's; without, it stays 0.
+static const int kSine = 12000;
+
+static Bytes rtp_header(int seq, uint32_t ts) {
+    Bytes h(12, 0);
+    h[0] = 0x80, h[1] = 96;
+    put_be16(&h[2], uint16_t(seq));
+    put_be32(&h[4], ts);
+    return h;
+}
+
+static std::vector<Bytes> phone_packets(Codec c, const Bytes& config, bool timestamps) {
+    std::vector<int16_t> pcm(2 * 2 * 44100 + 2 * 4096);
+    for (size_t i = 0; i < pcm.size() / 2; i++)
+        pcm[2 * i] = pcm[2 * i + 1] = int16_t(kSine * std::sin(2 * M_PI * 1000 * i / 44100));
+    const size_t total = 2 * 44100;   // frames to send
+    std::vector<Bytes> out;
+    auto packet = [&](uint32_t ts, const uint8_t* p, size_t n) {
+        Bytes b = rtp_header(int(out.size()), timestamps ? ts : 0);
+        b.insert(b.end(), p, p + n);
+        out.push_back(std::move(b));
+    };
+    switch (c) {
+    case Codec::Sbc: {
         sbc_t sbc;
         sbc_init_a2dp(&sbc, 0, config.data(), config.size());
         sbc.endian = SBC_LE;
-        size_t codesize = sbc_get_codesize(&sbc);
-        std::vector<int16_t> pcm(codesize / 2);
-        Bytes pkt(895);
-        double phase = 0;
-        for (int p = 0; p < 2 * 44100 / (5 * 128); p++) {      // two seconds
-            size_t len = 13;
-            for (int f = 0; f < 5; f++) {
-                for (size_t i = 0; i < pcm.size() / 2; i++) {
-                    pcm[2 * i] = pcm[2 * i + 1] = int16_t(12000 * std::sin(phase));
-                    phase += 2 * M_PI * 1000 / 44100;
-                }
+        size_t codesize = sbc_get_codesize(&sbc);   // 128 frames
+        Bytes pl(1024);
+        for (size_t f = 0; f + 5 * 128 <= total; f += 5 * 128) {
+            size_t len = 1;
+            for (int k = 0; k < 5; k++) {
                 ssize_t w = 0;
-                sbc_encode(&sbc, pcm.data(), codesize, &pkt[len], pkt.size() - len, &w);
+                sbc_encode(&sbc, &pcm[2 * (f + 128 * k)], codesize, &pl[len], pl.size() - len, &w);
                 len += w;
             }
-            pkt[0] = 0x80; pkt[1] = 96; pkt[2] = p >> 8; pkt[3] = p & 0xFF;
-            if (timestamps) put_be32(&pkt[4], uint32_t(p * 5 * 128));
-            pkt[12] = 5;
-            if (p != drop_packet && write(sv[1], pkt.data(), len) < 0) break;
+            pl[0] = 5;
+            packet(uint32_t(f), pl.data(), len);
         }
         sbc_finish(&sbc);
+        break;
+    }
+#ifdef BTDISK_AAC
+    case Codec::Aac: {
+        HANDLE_AACENCODER enc = nullptr;
+        aacEncOpen(&enc, 0, 2);
+        aacEncoder_SetParam(enc, AACENC_AOT, config[0] & 0x80 ? AOT_MP2_AAC_LC : AOT_AAC_LC);
+        aacEncoder_SetParam(enc, AACENC_SAMPLERATE, 44100);
+        aacEncoder_SetParam(enc, AACENC_CHANNELMODE, MODE_2);
+        aacEncoder_SetParam(enc, AACENC_BITRATE, 256000);
+        aacEncoder_SetParam(enc, AACENC_AUDIOMUXVER, 2);
+        aacEncoder_SetParam(enc, AACENC_SIGNALING_MODE, 1);
+        aacEncoder_SetParam(enc, AACENC_TRANSMUX, TT_MP4_LATM_MCP1);
+        aacEncoder_SetParam(enc, AACENC_HEADER_PERIOD, 1);
+        aacEncEncode(enc, nullptr, nullptr, nullptr, nullptr);
+        Bytes pl(2048);
+        uint32_t frames_out = 0;
+        for (size_t f = 0; f + 1024 <= total + 2048; f += 1024) {   // the encoder lags 2048
+            void* in_bufs[] = {&pcm[2 * f]};
+            INT in_ids[] = {IN_AUDIO_DATA}, in_sizes[] = {2048 * 2}, in_el[] = {2};
+            void* out_bufs[] = {pl.data()};
+            INT out_ids[] = {OUT_BITSTREAM_DATA}, out_sizes[] = {INT(pl.size())}, out_el[] = {1};
+            AACENC_BufDesc ind = {1, in_bufs, in_ids, in_sizes, in_el};
+            AACENC_BufDesc outd = {1, out_bufs, out_ids, out_sizes, out_el};
+            AACENC_InArgs ia = {2048, 0};
+            AACENC_OutArgs oa = {};
+            if (aacEncEncode(enc, &ind, &outd, &ia, &oa) != AACENC_OK) break;
+            if (oa.numOutBytes > 0) {
+                packet(frames_out, pl.data(), size_t(oa.numOutBytes));
+                frames_out += 1024;
+            }
+        }
+        aacEncClose(&enc);
+        break;
+    }
+#endif
+#ifdef BTDISK_APTX
+    case Codec::Aptx:
+    case Codec::AptxHd: {
+        bool hd = c == Codec::AptxHd;
+        aptx_context* ctx = aptx_init(hd);
+        const size_t per = hd ? 120 : 150;   // codewords (4 frames each) a packet
+        std::vector<uint8_t> in24(per * 4 * 2 * 3);
+        Bytes pl(per * 6);
+        for (size_t f = 0; f + per * 4 <= total; f += per * 4) {
+            for (size_t i = 0; i < per * 4 * 2; i++) {
+                int32_t v = pcm[2 * f + i] * 256;
+                in24[3 * i] = uint8_t(v), in24[3 * i + 1] = uint8_t(v >> 8), in24[3 * i + 2] = uint8_t(v >> 16);
+            }
+            size_t written = 0;
+            aptx_encode(ctx, in24.data(), in24.size(), pl.data(), pl.size(), &written);
+            if (hd) packet(uint32_t(f), pl.data(), written);
+            else out.emplace_back(pl.begin(), pl.begin() + written);
+        }
+        aptx_finish(ctx);
+        break;
+    }
+#endif
+    default:
+        break;
+    }
+    return out;
+}
+
+struct RoundTrip {
+    std::vector<int16_t> left;   // the left channel as it reached the live stream
+    uint64_t lost = 0;
+};
+
+// The packets through a SEQPACKET socket, like the L2CAP socket BlueZ hands over, into the
+// sink's reader and a WAV stream; packet drop_packet goes missing on the way.
+static RoundTrip a2dp_roundtrip(Codec c, const Bytes& config, int volume, int drop_packet,
+                                bool timestamps = false) {
+    std::vector<Bytes> packets = phone_packets(c, config, timestamps);
+    int sv[2];
+    socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv);
+    std::thread phone([&] {
+        for (size_t p = 0; p < packets.size(); p++)
+            if (int(p) != drop_packet && write(sv[1], packets[p].data(), packets[p].size()) < 0) break;
         close(sv[1]);
     });
     ChunkQueue q;
@@ -652,38 +751,85 @@ static std::vector<int16_t> a2dp_roundtrip(int volume, int drop_packet, bool tim
     LiveStream stream(enc, 44100, 2);
     A2dpSink sink(stream, true, 0);
     sink.set_volume(volume);
-    sink.reader(sv[0], 895, config);       // returns when the phone closes the socket
+    sink.reader(sv[0], 895, c, config);       // returns when the phone closes the socket
     phone.join();
-    CHECK_EQ(sink.packets_lost(), uint64_t(drop_packet >= 0 ? 1 : 0));
-    std::vector<int16_t> left;
-    Bytes c;
-    while (q.get(c, 0.01))
-        for (size_t i = 0; i + 3 < c.size(); i += 4) left.push_back(int16_t(get_le16(&c[i])));
-    return left;
+    RoundTrip r;
+    r.lost = sink.packets_lost();
+    Bytes chunk;
+    while (q.get(chunk, 0.01))
+        for (size_t i = 0; i + 3 < chunk.size(); i += 4) r.left.push_back(int16_t(get_le16(&chunk[i])));
+    return r;
+}
+
+// One second from 0.5 s on: a 1 kHz sine at the level the volume says.
+static void check_sine(const char* name, const std::vector<int16_t>& x, int volume) {
+    CHECK(x.size() > 80000);
+    if (x.size() < 44100 + 22050) {
+        printf("  %s: only %zu samples\n", name, x.size());
+        return;
+    }
+    int crossings = 0, peak = 0;
+    for (size_t k = 22051; k < 22050 + 44100; k++) {
+        if ((x[k - 1] < 0) != (x[k] < 0)) crossings++;
+        peak = std::max(peak, std::abs(int(x[k])));
+    }
+    int want = volume == 127 ? kSine : kSine * volume * volume / (127 * 127);
+    if (std::abs(crossings / 2 - 1000) > 3 || std::abs(peak - want) >= want / 10)
+        printf("  %s: %d crossings, peak %d (want %d)\n", name, crossings, peak, want);
+    CHECK(std::abs(crossings / 2 - 1000) <= 3);
+    CHECK(std::abs(peak - want) < want / 10);
 }
 
 static void test_a2dp() {
+    const Bytes sbc = {0x21, 0x15, 2, 53};
     for (int volume : {127, 64}) {
-        auto x = a2dp_roundtrip(volume, volume == 64 ? 10 : -1);
-        CHECK(x.size() > 80000);
-        if (x.size() < 44100) continue;
-        int crossings = 0, peak = 0;
-        for (size_t k = 22051; k < 22050 + 44100; k++) {
-            if ((x[k - 1] < 0) != (x[k] < 0)) crossings++;
-            peak = std::max(peak, std::abs(int(x[k])));
-        }
-        CHECK(std::abs(crossings / 2 - 1000) <= 3);
-        int want = volume == 127 ? 12000 : 12000 * 64 * 64 / (127 * 127);
-        CHECK(std::abs(peak - want) < want / 10);
+        int drop = volume == 64 ? 10 : -1;
+        RoundTrip r = a2dp_roundtrip(Codec::Sbc, sbc, volume, drop);
+        CHECK_EQ(r.lost, uint64_t(drop >= 0 ? 1 : 0));
+        check_sine("sbc", r.left, volume);
     }
     // A lost packet is filled to its length: the timeline (2 s of 640-frame packets) comes out
     // whole, found by the RTP timestamps or, without them, by the sequence numbers.
     // (Less the resampler's look-ahead, in the WAV encoder's whole chunks of 1152 frames.)
     const size_t whole = (2 * 44100 / 640 * 640 - Resampler::kTaps / 2) / 1152 * 1152;
     for (bool ts : {true, false}) {
-        CHECK_EQ(a2dp_roundtrip(127, -1, ts).size(), whole);
-        CHECK_EQ(a2dp_roundtrip(127, 30, ts).size(), whole);
+        CHECK_EQ(a2dp_roundtrip(Codec::Sbc, sbc, 127, -1, ts).left.size(), whole);
+        CHECK_EQ(a2dp_roundtrip(Codec::Sbc, sbc, 127, 30, ts).left.size(), whole);
     }
+
+    // The other codecs, configured as select_config() asks a phone that offers what we do.
+    for (auto& info : available_codecs()) {
+        if (info.id == Codec::Sbc) continue;
+        Bytes config = select_config(info.id, info.caps.data(), info.caps.size());
+        CHECK(!config.empty());
+        CHECK(Decoder::create(info.id, config) != nullptr);
+        for (int volume : {127, 64})
+            check_sine(info.name, a2dp_roundtrip(info.id, config, volume, -1, true).left, volume);
+        if (!Decoder::create(info.id, config)->rtp()) continue;
+        // With RTP, a lost packet is filled: the same length with or without the loss.
+        for (bool ts : {true, false}) {
+            size_t n = a2dp_roundtrip(info.id, config, 127, -1, ts).left.size();
+            RoundTrip r = a2dp_roundtrip(info.id, config, 127, 30, ts);
+            CHECK_EQ(r.lost, uint64_t(1));
+            CHECK_EQ(r.left.size(), n);
+        }
+    }
+    // Configurations: a phone's caps with more than we take, and ones we can't take.
+    const uint8_t aac_phone[] = {0xC0, 0x01, 0x8C, 0x84, 0xE2, 0x00};   // 44.1 + 48 kHz
+    if (find_codec("aac")) {
+        CHECK(select_config(Codec::Aac, aac_phone, 6) == (Bytes{0x80, 0x01, 0x04, 0x84, 0xE2, 0x00}));
+        const uint8_t aac48[] = {0x80, 0x00, 0x84, 0x84, 0xE2, 0x00};
+        CHECK(select_config(Codec::Aac, aac48, 6).empty());
+    }
+    const uint8_t aptx_phone[] = {0x4F, 0, 0, 0, 0x01, 0x00, 0x33};      // 44.1/48 kHz, stereo/mono
+    if (find_codec("aptx")) {
+        CHECK(select_config(Codec::Aptx, aptx_phone, 7) == (Bytes{0x4F, 0, 0, 0, 0x01, 0x00, 0x22}));
+        const uint8_t aptx_hd_ids[] = {0xD7, 0, 0, 0, 0x24, 0x00, 0x22};
+        CHECK(select_config(Codec::Aptx, aptx_hd_ids, 7).empty());
+    }
+    auto list = parse_codecs("aptx_hd, bogus aac");
+    CHECK(!list.empty() && list.back()->id == Codec::Sbc);
+    CHECK_EQ(list.size(), size_t(find_codec("aac") ? 3 : 1));
 }
 
 int main(int argc, char** argv) {

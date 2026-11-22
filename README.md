@@ -21,7 +21,8 @@ Bluetooth right now.
   when it opens a file, so the song's own title would go stale as soon as the next song started;
   `tags = track` puts it there anyway.
 - **Digital end to end.** No ground-loop hiss: 256 kbps MP3 by default, or the phone's PCM
-  untouched in WAV files for radios that play them.
+  untouched in WAV files for radios that play them. The phone can send AAC or aptX as well as
+  SBC (aptX HD too, with `codecs` in the config).
 - **Clocks kept in step.** The phone's clock and the radio's are tracked and the difference is
   resampled away, so a long drive doesn't end in a skip or a dropout.
 - **One cable, zero setup.** The radio's USB port powers the Pi. Pair "Car USB" once and it
@@ -83,9 +84,10 @@ clock from the A2DP RTP timestamps and the radio's from how fast it drains the q
 resamples by the difference with a 48-tap polyphase ASRC (about 80 dB SNR, ~5% of the Zero W's
 core). A radio whose buffer is bigger than the cushion (likely at 200 ms) waits on btdisk and hides its
 clock, so there the phone is held to the Pi's clock instead. Lost Bluetooth packets are filled to their
-length, so the timeline stays exact.
+length, so the timeline stays exact (except with aptX, whose packets carry no RTP header to tell).
 
-The code in [`app/src`](app/src) follows the data: `a2dp` (SBC sink on BlueZ, libsbc) →
+The code in [`app/src`](app/src) follows the data: `a2dp` (sink endpoints on BlueZ, decoded by
+`codecs`: libsbc, fdk-aac, libfreeaptx) →
 `stream` (live PCM/MP3 chunks, resampled by `drift`) → `livefile` (file offsets ↔ stream) →
 `player` (button logic, tags) → `fat` → `scsi` → `ffs` (USB via FunctionFS). `bluez` handles
 AVRCP, pairing and reconnects.

@@ -14,12 +14,22 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(SYSTEMD REQUIRED IMPORTED_TARGET libsystemd)
 # libsbc decodes the A2DP stream: the BlueZ project's SBC library, small and in poky.
 pkg_check_modules(SBC REQUIRED IMPORTED_TARGET sbc)
+# AAC (fdk-aac) and aptX / aptX HD (libfreeaptx) when they are there; SBC alone without them.
+# BTDISK_ALL_CODECS makes them required (the image's build). On a dev box:
+#   sudo apt install libfdk-aac-dev libfreeaptx-dev
+option(BTDISK_ALL_CODECS "Fail without fdk-aac and libfreeaptx" OFF)
+if(BTDISK_ALL_CODECS)
+  set(CODEC_REQUIRED REQUIRED)
+endif()
+pkg_check_modules(FDKAAC ${CODEC_REQUIRED} IMPORTED_TARGET fdk-aac)
+pkg_check_modules(FREEAPTX ${CODEC_REQUIRED} IMPORTED_TARGET libfreeaptx)
 find_package(Threads REQUIRED)
 
 # Everything but main(), so the tests link the same code the daemon runs.
 add_library(btdisk_core STATIC
   src/a2dp.cpp
   src/bluez.cpp
+  src/codecs.cpp
   src/config.cpp
   src/drift.cpp
   src/fat.cpp
@@ -32,6 +42,18 @@ add_library(btdisk_core STATIC
   src/stream.cpp)
 target_include_directories(btdisk_core PUBLIC src)
 target_link_libraries(btdisk_core PUBLIC PkgConfig::SYSTEMD PkgConfig::SBC Threads::Threads)
+if(FDKAAC_FOUND)
+  target_compile_definitions(btdisk_core PUBLIC BTDISK_AAC)
+  target_link_libraries(btdisk_core PUBLIC PkgConfig::FDKAAC)
+else()
+  message(WARNING "fdk-aac not found: no AAC")
+endif()
+if(FREEAPTX_FOUND)
+  target_compile_definitions(btdisk_core PUBLIC BTDISK_APTX)
+  target_link_libraries(btdisk_core PUBLIC PkgConfig::FREEAPTX)
+else()
+  message(WARNING "libfreeaptx not found: no aptX")
+endif()
 
 add_executable(btdisk src/main.cpp)
 target_link_libraries(btdisk PRIVATE btdisk_core)

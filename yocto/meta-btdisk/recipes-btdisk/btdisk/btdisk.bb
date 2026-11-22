@@ -5,10 +5,10 @@ AVRCP commands and the track title lands in the file headers the radio reads."
 LICENSE = "MIT"
 LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda2f7b4f302"
 
-# sd-bus (libsystemd, already on the image as the init's library) for BlueZ, libsbc to decode
-# A2DP. Nothing else: no audio server, no Python.
-DEPENDS = "systemd sbc"
-RDEPENDS:${PN} = "libsystemd sbc bluez5"
+# sd-bus (libsystemd, already on the image as the init's library) for BlueZ; libsbc, fdk-aac and
+# libfreeaptx decode A2DP's SBC, AAC and aptX. Nothing else: no audio server, no Python.
+DEPENDS = "systemd sbc fdk-aac libfreeaptx"
+RDEPENDS:${PN} = "libsystemd sbc fdk-aac libfreeaptx bluez5"
 
 # Built from app/ in this repository: the layer is yocto/meta-btdisk, four levels up from here.
 FILESEXTRAPATHS:prepend := "${THISDIR}/files:${THISDIR}/../../../../:"
@@ -22,7 +22,7 @@ S = "${WORKDIR}/app"
 
 inherit cmake systemd pkgconfig
 
-EXTRA_OECMAKE = "-DCMAKE_BUILD_TYPE=Release -DBTDISK_TESTS=OFF -DBTDISK_TOOLS=OFF"
+EXTRA_OECMAKE = "-DCMAKE_BUILD_TYPE=Release -DBTDISK_TESTS=OFF -DBTDISK_TOOLS=OFF -DBTDISK_ALL_CODECS=ON"
 
 # file://app copies the working tree as it is, local build directories included.
 do_configure:prepend() {

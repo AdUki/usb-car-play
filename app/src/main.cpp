@@ -244,7 +244,8 @@ int main(int argc, char** argv) {
         a2dp = std::make_unique<A2dpSink>(stream, cfg.flag("audio.apply_volume", true),
                                           cfg.num("audio.rt_priority", 30),
                                           cfg.flag("bluetooth.delay_reporting", true)
-                                              ? int(pc.target_latency_s * 1000 + 0.5) : 0);
+                                              ? int(pc.target_latency_s * 1000 + 0.5) : 0,
+                                          parse_codecs(cfg.str("bluetooth.codecs", kDefaultCodecs)));
 
     std::unique_ptr<MediaControl> control;
     Bluez* bluez = nullptr;
