@@ -21,7 +21,10 @@ Player::Layout Player::layout_for(const PlayerConfig& cfg) {
 Player::Player(const PlayerConfig& cfg, Encoder& enc, MediaControl& control)
     : cfg_(cfg), enc_(enc), control_(control), lay_(layout_for(cfg)),
       data_(enc, lay_.data, lay_.align, cfg.target_latency_s, cfg.max_block_s, cfg.cache_bytes),
-      guard_until_(now_s() + cfg.guard_s) {}
+      guard_until_(now_s() + cfg.guard_s) {
+    data_.adapt_latency(cfg.max_latency_s);
+    latency_ = data_.latency_s();
+}
 
 Player::~Player() {
     {
@@ -104,8 +107,17 @@ void Player::on_disconnect() {
         paused_by_us_ = true;
     }
     data_.reset();
+    data_.reset_latency();     // the next host may be a radio
+    latency_changed();
     current_ = -1;
     settled_ = false;
+}
+
+void Player::latency_changed() {
+    double l = data_.latency_s();
+    if (l == latency_) return;
+    latency_ = l;
+    if (on_latency) on_latency(l);
 }
 
 TrackInfo Player::tag_info() {
@@ -222,6 +234,7 @@ void Player::read_file(int i, uint32_t offset, uint8_t* dst, size_t n) {
         uint8_t* p = dst + (a - offset);
         if (i == current_ && !probe) {
             data_.read(uint32_t(a - hdr_end), p, b - a);
+            latency_changed();
             note_data_read(now);
             if (!radio_live_ && data_.live()) {
                 // The radio streams the new file: fade the phone in once it has switched too.

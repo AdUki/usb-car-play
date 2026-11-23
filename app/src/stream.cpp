@@ -60,6 +60,11 @@ size_t ChunkQueue::trim_to(size_t max_bytes) {
     return dropped;
 }
 
+void ChunkQueue::note_cut() {
+    std::lock_guard<std::mutex> lk(mu_);
+    stats_.resets++;
+}
+
 void ChunkQueue::clear() {
     std::lock_guard<std::mutex> lk(mu_);
     q_.clear();

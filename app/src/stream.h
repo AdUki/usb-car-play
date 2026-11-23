@@ -24,6 +24,8 @@ public:
     // Drops the oldest chunks until at most max_bytes remain; returns the bytes dropped.
     size_t trim_to(size_t max_bytes);
     void clear();
+    // The backlog stepped without a trim (silence put in front of it): see ReadStats::resets.
+    void note_cut();
     uint64_t dropped_total() const { return dropped_; }
     // What the consumer (the radio) did since the last call: drift.h's RadioClock reads it.
     ReadStats take_stats();

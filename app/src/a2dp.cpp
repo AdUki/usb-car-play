@@ -191,6 +191,26 @@ void A2dpSink::report_delay(sd_bus* bus, const std::string& path, uint16_t delay
     }
 }
 
+void A2dpSink::set_delay(double ms) {
+    want_delay_ = int(std::clamp(ms, 0.1, 6553.5) * 10 + 0.5);
+}
+
+void A2dpSink::apply_delay(sd_bus* bus) {
+    int want = want_delay_.exchange(-1);
+    if (want < 0 || !delay_ || uint16_t(want) == delay_) return;
+    delay_ = uint16_t(want);
+    std::vector<std::string> paths;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        for (auto& [path, t] : transports_) {
+            t.delay_sent = false;      // logs the new value once taken; acquired() retries
+            paths.push_back(path);
+        }
+    }
+    LOGI("a2dp: delay now %.1f ms%s", delay_ / 10.0, paths.empty() ? " (for the next stream)" : "");
+    for (auto& p : paths) report_delay(bus, p, delay_);
+}
+
 void A2dpSink::delay_reported(const std::string& path, const char* error) {
     std::lock_guard<std::mutex> lk(mu_);
     auto it = transports_.find(path);

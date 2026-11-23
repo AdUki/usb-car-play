@@ -624,6 +624,7 @@ void Bluez::loop_event(bool tick) {
         last_reconnect_ = now_s();
         reconnect();
     }
+    if (a2dp_ && bluez_up_) a2dp_->apply_delay(bus_);
     run_commands();
 }
 

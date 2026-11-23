@@ -50,6 +50,7 @@ PlayerConfig player_config(const Config& c) {
     p.dynamic_names = c.flag("player.dynamic_names", p.dynamic_names);
     p.name_prefix = c.str("player.name_prefix", p.name_prefix);
     p.target_latency_s = c.num("player.target_latency_ms", 200) / 1000.0;
+    p.max_latency_s = c.num("player.max_latency_ms", 6000) / 1000.0;
     p.max_block_s = c.real("player.max_block_s", p.max_block_s);
     p.cache_bytes = size_t(c.num("player.cache_mb", 8)) << 20;
     p.guard_s = c.real("player.guard_s", p.guard_s);
@@ -268,6 +269,9 @@ int main(int argc, char** argv) {
     }
 
     Player player(pc, *enc, *control);
+    player.on_latency = [&](double s) {
+        if (a2dp) a2dp->set_delay(s * 1000);
+    };
     FatOptions fo = fat_options(cfg, pc);
     FatVolume vol(player.make_files(), fo);
     LOGI("volume: %s, %d x %s files of %u MiB, %.1f GiB", fo.fat32 ? "FAT32" : "FAT16", pc.files,

@@ -6,6 +6,13 @@
 // file offsets the first time the radio asks for them (the watermark);
 // recently assigned bytes are kept so re-reads return the same data. Reads behind the cache, or
 // gaps the radio jumps over, read as silence.
+//
+// A read can only be answered once the stream has produced all of it. A radio reads a few KiB
+// at a time and the cushion covers that, but a PC asks for 16..128 KiB at once (Linux: 120 KiB,
+// 3.75 s of 256 kbps MP3): each read would wait seconds for live audio, and the player gets it
+// in lumps, stutters and stalls. With adapt_latency() a read longer than the cushion raises
+// it (once, at the file's start if it can) to what such a host reads, so its reads are answered
+// at once from audio already queued.
 #pragma once
 
 #include "stream.h"
@@ -29,6 +36,13 @@ public:
     // produced it (at most max_block_s per chunk, then silence).
     void read(uint32_t offset, uint8_t* dst, size_t n);
 
+    // Raise the cushion for hosts that read more at once than it holds, up to max_s (0: never).
+    void adapt_latency(double max_s) { max_target_ = size_t(max_s * enc_.byte_rate); }
+    // A new host (USB reconnected): back to target_latency_s.
+    void reset_latency() { target_ = base_target_; }
+    // How far behind live the radio starts a file (the delay to report to the phone).
+    double latency_s() const { return double(target_) / enc_.byte_rate; }
+
     uint32_t watermark() const { return watermark_; }
     uint32_t size() const { return size_; }
     uint32_t underruns() const { return underruns_; }
@@ -39,10 +53,12 @@ private:
     void fill(uint32_t end);
     void append(uint32_t offset, const Bytes& data);
     void from_cache(uint32_t offset, uint8_t* dst, size_t n) const;
+    void grow_for(size_t n);
+    size_t pad_silence(size_t bytes);
 
     Encoder& enc_;
     uint32_t size_, align_;
-    size_t target_, cache_limit_;
+    size_t base_target_, target_, max_target_ = 0, cache_limit_;
     double max_block_;
     uint32_t watermark_ = 0;
     bool started_ = false;

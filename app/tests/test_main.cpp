@@ -10,6 +10,7 @@
 #include "stream.h"
 
 #include <algorithm>
+#include <cmath>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
@@ -263,6 +264,85 @@ static void test_start_cushion() {
     }
 }
 
+// A PC reads 16..128 KiB at once, more than the cushion holds: the cushion grows to cover such
+// reads, answered at once from queued audio instead of each waiting seconds for live audio.
+static void test_big_reads() {
+    const double target = 0.2, br = 176400;
+    const size_t chunk = 1152 * 4;
+    const double raised = target + 1 + 131072 / br;
+    auto near = [](double a, double b) { return std::fabs(a - b) < 0.03; };
+    {
+        // The first read is big (Linux: 16 KiB, then more): raised before the file starts,
+        // all of it in front of the audio. No gap later, the reads never wait.
+        ChunkQueue q;
+        WavEncoder enc(q, 44100, 2);
+        LiveFileData d(enc, 64 << 20, 4, target, 0.01, 8 << 20);
+        d.adapt_latency(6);
+        Bytes b(65536);
+        d.read(0, b.data(), b.size());
+        CHECK(near(d.latency_s(), raised));
+        CHECK_EQ(d.underruns(), 0u);
+        CHECK(d.watermark() + chunk > uint32_t(raised * br));   // the cushion, all silence
+        Bytes live(size_t(raised * br) / chunk * chunk, 0x55);
+        enc.feed(live.data(), live.size());
+        const uint32_t cushion_end = d.watermark();
+        for (uint32_t at = 65536; at + 65536 <= cushion_end; at += 65536) d.read(at, b.data(), b.size());
+        Bytes big(122880);
+        d.read(cushion_end, big.data(), big.size());     // 120 KiB: from the queue, at once
+        CHECK_EQ(d.underruns(), 0u);
+        CHECK(big[0] == 0x55 && big.back() == 0x55);
+        CHECK(near(d.latency_s(), raised));                // no further step
+        d.reset();                                         // the next file keeps it
+        CHECK(near(d.latency_s(), raised));
+        d.reset_latency();
+        CHECK(near(d.latency_s(), target));
+    }
+    {
+        // A radio's few KiB: the cushion covers them, nothing changes.
+        ChunkQueue q;
+        WavEncoder enc(q, 44100, 2);
+        LiveFileData d(enc, 64 << 20, 4, target, 0.01, 8 << 20);
+        d.adapt_latency(6);
+        Bytes b(2048);
+        for (uint32_t at = 0; at < 64 * 2048; at += 2048) d.read(at, b.data(), b.size());
+        CHECK(near(d.latency_s(), target));
+    }
+    {
+        // Mid-file (a host whose reads grow after the start): silence goes in at the watermark,
+        // once, and the radio clock is told the backlog stepped.
+        ChunkQueue q;
+        WavEncoder enc(q, 44100, 2);
+        LiveFileData d(enc, 64 << 20, 4, target, 0.01, 8 << 20);
+        d.adapt_latency(6);
+        Bytes live(size_t(0.5 * br) / chunk * chunk, 0x66);
+        enc.feed(live.data(), live.size());
+        Bytes b(chunk);
+        d.read(0, b.data(), b.size());
+        CHECK_EQ(b[0], 0x66);
+        uint32_t wm = d.watermark();
+        q.take_stats();
+        Bytes big(65536);
+        d.read(wm, big.data(), big.size());
+        CHECK(near(d.latency_s(), raised));
+        CHECK_EQ(d.underruns(), 0u);
+        CHECK(big[0] == 0 && big.back() == 0);             // 1.7 s of silence first
+        CHECK(q.take_stats().resets >= 1);
+        CHECK(d.watermark() >= wm + uint32_t((raised - target - 0.03) * br));
+    }
+    {
+        // Capped, and off.
+        ChunkQueue q;
+        WavEncoder enc(q, 44100, 2);
+        LiveFileData d(enc, 64 << 20, 4, target, 0.01, 8 << 20), off(enc, 64 << 20, 4, target, 0.01, 8 << 20);
+        d.adapt_latency(1.0);
+        Bytes b(65536);
+        d.read(0, b.data(), b.size());
+        CHECK(near(d.latency_s(), 1.0));
+        off.read(0, b.data(), b.size());
+        CHECK(near(off.latency_s(), target));
+    }
+}
+
 struct PlayerRig {
     ChunkQueue q;
     WavEncoder enc{q, 44100, 2};
@@ -274,6 +354,7 @@ struct PlayerRig {
         cfg.file_size = file_mb << 20;
         cfg.guard_s = guard;
         cfg.max_block_s = 0.01;
+        cfg.max_latency_s = 0;             // reads 64 KiB like a PC, stands for a radio
         cfg.metadata_wait_s = 0.5;
         cfg.pause_after_s = 0.2;
         cfg.autoplay = false;
@@ -293,6 +374,21 @@ struct PlayerRig {
 };
 
 static void test_player() {
+    {
+        // A PC's reads: the player says the new latency (the phone's delay), and back on unplug.
+        PlayerRig r;
+        r.cfg.max_latency_s = 6;
+        r.player = std::make_unique<Player>(r.cfg, r.enc, r.phone);
+        std::vector<double> told;
+        r.player->on_latency = [&](double s) { told.push_back(s); };
+        r.read(2, 44, 65536);
+        r.read(2, 44 + 65536, 65536);                  // carries on: playback of file 3
+        CHECK_EQ(told.size(), size_t(1));
+        CHECK(!told.empty() && told[0] > 1.5 && told[0] < 2.5);
+        r.player->on_disconnect();
+        CHECK_EQ(told.size(), size_t(2));
+        CHECK(told.size() == 2 && std::fabs(told[1] - 0.2) < 0.03);
+    }
     {
         PlayerRig r;
         r.read(5, 0, 512);                 // a first sector: nothing sent
@@ -905,6 +1001,7 @@ int main(int argc, char** argv) {
         test_fat(true, 2048, 4096);
         test_player();
         test_start_cushion();
+        test_big_reads();
         test_a2dp();
         test_drift();
         printf("unit tests: %s\n", g_failures ? "FAILED" : "ok");

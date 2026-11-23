@@ -42,6 +42,10 @@ public:
     int clear_configuration(sd_bus_message* m);
     void acquired(sd_bus* bus, const std::string& path, int fd, uint16_t read_mtu);
     void delay_reported(const std::string& path, const char* error);   // the Set's reply
+    // A new delay to report (any thread): the bus thread sends it in apply_delay(). Nothing
+    // without delay reporting.
+    void set_delay(double ms);
+    void apply_delay(sd_bus* bus);
 
     // One registered MediaEndpoint1 object (the sd-bus callbacks' userdata).
     struct Endpoint {
@@ -74,6 +78,7 @@ private:
     bool apply_volume_;
     int rt_prio_;
     uint16_t delay_;   // in 1/10 ms, as AVDTP has it
+    std::atomic<int> want_delay_{-1};   // set_delay()'s, until applied
     std::vector<std::unique_ptr<Endpoint>> endpoints_;
     std::mutex mu_;
     std::map<std::string, Transport> transports_;

@@ -4,8 +4,8 @@
 
 LiveFileData::LiveFileData(Encoder& enc, uint32_t size, uint32_t align, double target_latency_s,
                            double max_block_s, size_t cache_bytes)
-    : enc_(enc), size_(size), align_(align), target_(size_t(target_latency_s * enc.byte_rate)),
-      cache_limit_(cache_bytes), max_block_(max_block_s) {}
+    : enc_(enc), size_(size), align_(align), base_target_(size_t(target_latency_s * enc.byte_rate)),
+      target_(base_target_), cache_limit_(cache_bytes), max_block_(max_block_s) {}
 
 void LiveFileData::reset(bool continuous) {
     watermark_ = 0;
@@ -61,16 +61,42 @@ void LiveFileData::start_live() {
     // missing is made up with silence (in whole chunks). That fixes the latency at the target,
     // which is also the delay reported to the phone. After Next/Previous, all of it silence.
     size_t dropped = enc_.queue.trim_to(silent_ ? 0 : target_);
-    const Bytes& silence = enc_.silence_chunk();
-    size_t backlog = enc_.queue.backlog(), pad = 0;
-    for (; backlog + pad + silence.size() <= target_; pad += silence.size()) {
-        if (silence.size() > size_ - watermark_) break;
-        append(watermark_, silence);
-        watermark_ += uint32_t(silence.size());
-    }
+    size_t backlog = enc_.queue.backlog();
+    size_t pad = backlog < target_ ? pad_silence(target_ - backlog) : 0;
     double br = enc_.byte_rate;
     LOGT("file start at %u%s: %.2f s dropped, %.2f s live + %.2f s silence",
          watermark_ - uint32_t(pad), silent_ ? " (silent)" : "", dropped / br, backlog / br, pad / br);
+}
+
+size_t LiveFileData::pad_silence(size_t bytes) {
+    // Whole chunks of silence at the watermark, as many as fit in `bytes` (and in the file).
+    const Bytes& silence = enc_.silence_chunk();
+    size_t pad = 0;
+    for (; pad + silence.size() <= bytes && silence.size() <= size_ - watermark_; pad += silence.size()) {
+        append(watermark_, silence);
+        watermark_ += uint32_t(silence.size());
+    }
+    return pad;
+}
+
+void LiveFileData::grow_for(size_t n) {
+    // A read the cushion can't cover would wait for live audio. A host that reads this much
+    // grows its reads to its largest soon (Linux: 16 KiB, 64 KiB, then 120 KiB), so the cushion
+    // goes up once to cover 128 KiB, plus a second for the host's own buffering to fill from.
+    if (!max_target_ || n <= target_) return;
+    size_t want = base_target_ + enc_.byte_rate + std::max<size_t>(n, 128u << 10);
+    want = std::min(want, std::max(max_target_, target_));
+    if (want <= target_) return;
+    size_t more = want - target_;
+    target_ = want;
+    double br = enc_.byte_rate;
+    LOGI("the host reads %.2f s at once: latency raised to %.2f s", n / br, target_ / br);
+    if (!started_) return;    // start_live() puts the new cushion in front
+    // Mid-file: the reader falls behind live by silence put in at the watermark (a gap, once).
+    // To the radio clock that is a step in the backlog, like a cut: it settles again around it.
+    size_t pad = pad_silence(more);
+    enc_.queue.note_cut();
+    LOGT("%.2f s of silence put in at %u", pad / br, watermark_ - uint32_t(pad));
 }
 
 void LiveFileData::read(uint32_t offset, uint8_t* dst, size_t n) {
@@ -80,6 +106,7 @@ void LiveFileData::read(uint32_t offset, uint8_t* dst, size_t n) {
         return;
     }
     uint32_t end = uint32_t(end64);
+    grow_for(end - offset);
     if (offset > watermark_ || (!segs_.empty() && offset < segs_.begin()->first)) {
         // The radio skipped ahead (resume after power-up, fast forward, first read mid-file), or
         // back behind what is kept (it came back from another source and starts the file over):

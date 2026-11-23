@@ -16,6 +16,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -55,6 +56,9 @@ struct PlayerConfig {
     bool dynamic_names = false;      // long file names follow the track
     std::string name_prefix = "Bluetooth";
     double target_latency_s = 0.2;   // the radio starts this far behind live; reported as delay
+    // A host that reads more at once than the cushion holds (a PC: 16..128 KiB) gets a bigger
+    // one, up to this (livefile.h); 0: never. Radios read a few KiB and keep target_latency_s.
+    double max_latency_s = 6.0;
     double max_block_s = 4.0;
     size_t cache_bytes = 8u << 20;
     double guard_s = 6.0;            // no commands this long after a mount
@@ -97,6 +101,10 @@ public:
     const LiveFileData& data() const { return data_; }
     std::vector<std::string> events();   // recent decisions, for tests and the log
 
+    // The latency changed (a host's big reads, or back to the target on a new host): the delay
+    // to report to the phone. Called with the player's lock held: keep it short.
+    std::function<void(double latency_s)> on_latency;
+
 private:
     void on_other_file(int i);
     void maybe_restart(int i);
@@ -112,6 +120,7 @@ private:
     TrackInfo tag_info();                    // what the tags of a file opened now say
     std::string long_name(int i);
     void event(const std::string& e);
+    void latency_changed();
 
     PlayerConfig cfg_;
     Encoder& enc_;
@@ -154,6 +163,7 @@ private:
     int trace_file_ = -1;                    // the log's read trace: where the last read ended
     uint64_t trace_next_ = 0;
     double last_read_ = 0;
+    double latency_ = 0;                     // last given to on_latency
     std::mutex ev_mu_;
     std::vector<std::string> events_;
 };

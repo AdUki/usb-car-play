@@ -81,7 +81,10 @@ after its first read.
 The radio reads ahead of real time. Each file starts exactly 200 ms behind live (trimmed or
 padded with silence), and the phone is told that delay over A2DP delay reporting, so video on the
 phone stays in sync. Both come from `target_latency_ms`. The radio adds its own buffering on top,
-which btdisk can't see.
+which btdisk can't see. A read is answered only once all of it is live: radios read a few KiB at a
+time, but a PC asks for up to 128 KiB (4 s of MP3), which would reach its player in lumps. A read
+bigger than the cushion makes btdisk raise it to cover such reads (about 5 s for MP3, 2 s for
+WAV, `max_latency_ms`) and report the new delay to the phone.
 
 Two crystals 100 ppm apart drift 0.36 s an hour, which would eventually eat that cushion. There
 is no audio PLL to tune, because the DAC is in the radio. Instead, btdisk measures the phone's
