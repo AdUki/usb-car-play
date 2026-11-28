@@ -195,9 +195,9 @@ static void test_start_cushion() {
     const double target = 0.2;
     const size_t chunk = 1152 * 4, cushion = size_t(target * 176400) / chunk * chunk;
     {
-        ChunkQueue q;
-        WavEncoder enc(q, 44100, 2);
-        LiveFileData d(enc, 64 << 20, 4, target, 0.01, 8 << 20);
+        LiveStream s{StreamConfig{}};
+        Encoder& enc = s.encoder();
+        LiveFileData d(s, 64 << 20, 4, target, 0.01, 8 << 20);
         Bytes b(cushion);
         d.read(0, b.data(), b.size());
         CHECK_EQ(d.watermark(), uint32_t(cushion));
@@ -209,9 +209,10 @@ static void test_start_cushion() {
         CHECK(b[0] == 0x55 && b[chunk - 1] == 0x55);   // then live audio, right behind it
     }
     {
-        ChunkQueue q;
-        WavEncoder enc(q, 44100, 2);
-        LiveFileData d(enc, 64 << 20, 4, target, 0.01, 8 << 20);
+        LiveStream s{StreamConfig{}};
+        ChunkQueue& q = s.queue();
+        Encoder& enc = s.encoder();
+        LiveFileData d(s, 64 << 20, 4, target, 0.01, 8 << 20);
         Bytes second(176400, 0x11);
         enc.feed(second.data(), second.size());   // a whole second queued: 0.8 s of it is stale
         Bytes b(chunk);
@@ -221,9 +222,10 @@ static void test_start_cushion() {
     }
     {
         // The previous file ran out: the next one goes on with the stream, no silence, no trim.
-        ChunkQueue q;
-        WavEncoder enc(q, 44100, 2);
-        LiveFileData d(enc, 64 << 20, 4, target, 0.01, 8 << 20);
+        LiveStream s{StreamConfig{}};
+        ChunkQueue& q = s.queue();
+        Encoder& enc = s.encoder();
+        LiveFileData d(s, 64 << 20, 4, target, 0.01, 8 << 20);
         d.reset(true);
         Bytes live(2 * chunk, 0x22);
         enc.feed(live.data(), live.size());
@@ -246,10 +248,10 @@ static void test_start_cushion() {
     }
     {
         // A file that ends inside a chunk: its tail goes to the next file, nothing is lost.
-        ChunkQueue q;
-        WavEncoder enc(q, 44100, 2);
+        LiveStream s{StreamConfig{}};
+        Encoder& enc = s.encoder();
         const uint32_t size = 3 * chunk + 1000;
-        LiveFileData d(enc, size, 4, target, 0.01, 8 << 20);
+        LiveFileData d(s, size, 4, target, 0.01, 8 << 20);
         d.reset(true);
         Bytes pcm(5 * chunk);
         for (size_t k = 0; k < pcm.size(); k++) pcm[k] = uint8_t(k / 4);
@@ -274,9 +276,9 @@ static void test_big_reads() {
     {
         // The first read is big (Linux: 16 KiB, then more): raised before the file starts,
         // all of it in front of the audio. No gap later, the reads never wait.
-        ChunkQueue q;
-        WavEncoder enc(q, 44100, 2);
-        LiveFileData d(enc, 64 << 20, 4, target, 0.01, 8 << 20);
+        LiveStream s{StreamConfig{}};
+        Encoder& enc = s.encoder();
+        LiveFileData d(s, 64 << 20, 4, target, 0.01, 8 << 20);
         d.set_max_latency(6);
         Bytes b(65536);
         d.read(0, b.data(), b.size());
@@ -299,9 +301,8 @@ static void test_big_reads() {
     }
     {
         // A radio's few KiB: the cushion covers them, nothing changes.
-        ChunkQueue q;
-        WavEncoder enc(q, 44100, 2);
-        LiveFileData d(enc, 64 << 20, 4, target, 0.01, 8 << 20);
+        LiveStream s{StreamConfig{}};
+        LiveFileData d(s, 64 << 20, 4, target, 0.01, 8 << 20);
         d.set_max_latency(6);
         Bytes b(2048);
         for (uint32_t at = 0; at < 64 * 2048; at += 2048) d.read(at, b.data(), b.size());
@@ -310,9 +311,10 @@ static void test_big_reads() {
     {
         // Mid-file (a host whose reads grow after the start): silence goes in at the watermark,
         // once, and the radio clock is told the backlog stepped.
-        ChunkQueue q;
-        WavEncoder enc(q, 44100, 2);
-        LiveFileData d(enc, 64 << 20, 4, target, 0.01, 8 << 20);
+        LiveStream s{StreamConfig{}};
+        ChunkQueue& q = s.queue();
+        Encoder& enc = s.encoder();
+        LiveFileData d(s, 64 << 20, 4, target, 0.01, 8 << 20);
         d.set_max_latency(6);
         Bytes live(size_t(0.5 * br) / chunk * chunk, 0x66);
         enc.feed(live.data(), live.size());
@@ -331,9 +333,8 @@ static void test_big_reads() {
     }
     {
         // Capped, and off.
-        ChunkQueue q;
-        WavEncoder enc(q, 44100, 2);
-        LiveFileData d(enc, 64 << 20, 4, target, 0.01, 8 << 20), off(enc, 64 << 20, 4, target, 0.01, 8 << 20);
+        LiveStream s{StreamConfig{}};
+        LiveFileData d(s, 64 << 20, 4, target, 0.01, 8 << 20), off(s, 64 << 20, 4, target, 0.01, 8 << 20);
         d.set_max_latency(1.0);
         Bytes b(65536);
         d.read(0, b.data(), b.size());
@@ -343,9 +344,16 @@ static void test_big_reads() {
     }
 }
 
+// The player's stream in the tests: the phone's PCM reaches the encoder as it is (no resampler).
+static StreamConfig rig_stream() {
+    StreamConfig c;
+    c.drift.enabled = false;
+    return c;
+}
+
 struct PlayerRig {
-    ChunkQueue q;
-    WavEncoder enc{q, 44100, 2};
+    LiveStream stream{rig_stream()};   // not started: the test feeds it
+    Encoder& enc = stream.encoder();
     FakePhone phone;
     PlayerConfig cfg;
     std::unique_ptr<Player> player;
@@ -358,7 +366,7 @@ struct PlayerRig {
         cfg.metadata_wait_s = 0.5;
         cfg.pause_after_s = 0.2;
         cfg.autoplay = false;
-        player = std::make_unique<Player>(cfg, enc, phone);
+        player = std::make_unique<Player>(cfg, stream, phone);
     }
     Bytes read(int file, uint32_t off, uint32_t n) {
         Bytes b(n);
@@ -378,7 +386,7 @@ static void test_player() {
         // A PC's reads: the player says the new latency (the phone's delay), and back on unplug.
         PlayerRig r;
         r.cfg.max_latency_s = 6;
-        r.player = std::make_unique<Player>(r.cfg, r.enc, r.phone);
+        r.player = std::make_unique<Player>(r.cfg, r.stream, r.phone);
         std::vector<double> told;
         r.player->on_latency = [&](double s) { told.push_back(s); };
         r.read(2, 44, 65536);
@@ -423,7 +431,7 @@ static void test_player() {
         r.cfg.phone_restart_s = 1.0;
         r.cfg.pause_after_s = 0;           // the pauses below are not the radio away
         r.cfg.max_block_s = 0.0005;        // (reads fast: the waits below are the timeline)
-        r.player = std::make_unique<Player>(r.cfg, r.enc, r.phone);
+        r.player = std::make_unique<Player>(r.cfg, r.stream, r.phone);
         r.play(1, 6);
         r.read(1, 0, 512);                 // the start, and on from there
         CHECK_EQ(r.phone.sent_str(), std::string(""));
@@ -462,26 +470,26 @@ static void test_player() {
         // phone sends until it has switched; then the new song fades in.
         PlayerRig r;
         r.cfg.skip_mute_s = 0.05;
-        r.player = std::make_unique<Player>(r.cfg, r.enc, r.phone);
+        r.player = std::make_unique<Player>(r.cfg, r.stream, r.phone);
         auto tone = [](int16_t v, double s) { return std::vector<int16_t>(size_t(s * 44100) / 1152 * 1152 * 2, v); };
         auto write = [&](const std::vector<int16_t>& pcm) {
-            r.enc.write(reinterpret_cast<const uint8_t*>(pcm.data()), pcm.size() * 2);
+            r.stream.write_pcm(reinterpret_cast<const uint8_t*>(pcm.data()), pcm.size() * 2);
         };
         r.play(0, 3);
         write(tone(1000, 0.5));            // the old song, queued
         r.read(1, 0, 44);                  // Next
         CHECK_EQ(r.phone.sent_str(), std::string("next"));
-        CHECK(r.enc.hushed());
+        CHECK(r.stream.phone_muted());
         write(tone(1000, 0.2));            // the old song still coming: muted
         Bytes start = r.read(1, 44, uint32_t(0.4 * 176400) / 4 * 4);
         CHECK(std::all_of(start.begin(), start.end(), [](uint8_t b) { return b == 0; }));
         usleep(150000);                    // the phone switched, and skip_mute_s passed
         write(tone(2000, 0.1));            // but the radio has not streamed the file yet: muted
-        CHECK(r.enc.hushed());
+        CHECK(r.stream.phone_muted());
         Bytes streams = r.read(1, 44 + uint32_t(start.size()), uint32_t(0.1 * 176400) / 4 * 4);
         CHECK(std::all_of(streams.begin(), streams.end(), [](uint8_t b) { return b == 0; }));
         write(tone(2000, 0.3));            // it does now: the new song fades in, then as it is
-        CHECK(!r.enc.hushed());
+        CHECK(!r.stream.phone_muted());
         Bytes next = r.read(1, 44 + uint32_t(start.size() + streams.size()), uint32_t(0.3 * 176400) / 4 * 4);
         auto at = [&](size_t frame) { return int16_t(get_le16(&next[frame * 4])); };
         size_t first = 0;
@@ -495,8 +503,7 @@ static void test_player() {
     {
         // The metadata in the header is the phone's new track, even when the phone is slow.
         PlayerConfig c;
-        ChunkQueue q;
-        WavEncoder enc(q, 44100, 2);
+        LiveStream s{StreamConfig{}};
         FakePhone phone;
         phone.delay_s = 0.2;
         c.format = "wav";
@@ -506,7 +513,7 @@ static void test_player() {
         c.guard_s = 0;
         c.max_block_s = 0.01;
         c.metadata_wait_s = 1.0;
-        Player p(c, enc, phone);
+        Player p(c, s, phone);
         Bytes b(65536);
         for (uint32_t o = 4096; o < 4096 + 8 * 65536; o += 65536) p.read_file(0, o, b.data(), b.size());
         Bytes h(4096);
@@ -521,15 +528,14 @@ static void test_player() {
     {
         // MP3 headers carry ID3v2 with the title, and ID3v1 at the end of the file.
         PlayerConfig c;
-        ChunkQueue q;
-        WavEncoder enc(q, 44100, 2);   // the encoder's content does not matter here
+        LiveStream s{StreamConfig{}};   // the encoder's content does not matter here
         FakePhone phone;
         c.format = "mp3";
         c.tags = "track";
         c.file_size = 16u << 20;
         c.guard_s = 0;
         c.max_block_s = 0.01;
-        Player p(c, enc, phone);
+        Player p(c, s, phone);
         Bytes h(4096), tail(128);
         p.read_file(0, 0, h.data(), h.size());
         CHECK(memcmp(h.data(), "ID3", 3) == 0);
@@ -542,14 +548,13 @@ static void test_player() {
     {
         // By default the tags carry the phone's name: it stays true while the songs change.
         PlayerConfig c;
-        ChunkQueue q;
-        WavEncoder enc(q, 44100, 2);
+        LiveStream s{StreamConfig{}};
         FakePhone phone;
         c.format = "mp3";
         c.file_size = 16u << 20;
         c.guard_s = 0;
         c.max_block_s = 0.01;
-        Player p(c, enc, phone);
+        Player p(c, s, phone);
         Bytes h(4096), tail(128);
         p.read_file(0, 0, h.data(), h.size());
         std::string hs(h.begin(), h.end());
@@ -582,7 +587,7 @@ static void test_player() {
         // and the phone gets five Next (with 16 files; files/2 - 1 is the furthest unambiguous).
         PlayerRig r;
         r.cfg.files = 16;
-        r.player = std::make_unique<Player>(r.cfg, r.enc, r.phone);
+        r.player = std::make_unique<Player>(r.cfg, r.stream, r.phone);
         r.play(0, 3);
         r.phone.clear();
         r.read(5, 0, 512);
@@ -597,7 +602,7 @@ static void test_player() {
         // Play again, without the radio doing anything.
         PlayerRig r;
         r.cfg.autoplay = true;
-        r.player = std::make_unique<Player>(r.cfg, r.enc, r.phone);
+        r.player = std::make_unique<Player>(r.cfg, r.stream, r.phone);
         r.phone.state = "paused";
         r.play(0, 2);
         CHECK_EQ(r.phone.sent_str(), std::string("play"));
@@ -714,8 +719,7 @@ static void test_player() {
         // The Sony's Next, as its log shows it: 4 sectors from the new file's last sector (its
         // ID3v1 tag; 3 of them are the start of the file after), then the tag and the first
         // frames. One Next, not Next, Next, Previous.
-        ChunkQueue q;
-        WavEncoder enc(q, 44100, 2);
+        LiveStream s{StreamConfig{}};
         FakePhone phone;
         PlayerConfig c;
         c.format = "mp3";
@@ -723,7 +727,7 @@ static void test_player() {
         c.guard_s = 0;
         c.max_block_s = 0.01;
         c.metadata_wait_s = 0.2;
-        Player p(c, enc, phone);
+        Player p(c, s, phone);
         FatVolume vol(p.make_files(), FatOptions{});
         ScsiDisk disk(vol, "Generic", "USB Flash Disk", "0123456789AB", false);
         UsbHost host(disk);
@@ -750,15 +754,14 @@ static void test_player() {
     }
     {
         // The player's files through the FAT layer, with dynamic long names.
-        ChunkQueue q;
-        WavEncoder enc(q, 44100, 2);
+        LiveStream s{StreamConfig{}};
         FakePhone phone;
         PlayerConfig c;
         c.file_size = 32u << 20;
         c.dynamic_names = true;
         c.guard_s = 0;
         c.max_block_s = 0.01;
-        Player p(c, enc, phone);
+        Player p(c, s, phone);
         FatOptions o;
         o.dynamic_names = true;
         FatVolume vol(p.make_files(), o);
@@ -904,9 +907,8 @@ static RoundTrip a2dp_roundtrip(Codec c, const Bytes& config, int volume, int dr
             if (int(p) != drop_packet && write(sv[1], packets[p].data(), packets[p].size()) < 0) break;
         close(sv[1]);
     });
-    ChunkQueue q;
-    WavEncoder enc(q, 44100, 2);
-    LiveStream stream(enc, 44100, 2);
+    LiveStream stream{StreamConfig{}};
+    ChunkQueue& q = stream.queue();
     A2dpSink sink(stream, true, 0);
     sink.set_volume(volume);
     sink.reader(sv[0], 895, c, config);       // returns when the phone closes the socket

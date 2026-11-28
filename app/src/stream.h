@@ -12,7 +12,9 @@
 #include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 
 class ChunkQueue {
@@ -40,48 +42,33 @@ private:
     double last_put_ = 0;
 };
 
+// PCM in, chunks into the queue. LiveStream feeds it; LiveFileData reads what it says about the
+// chunks (their rate, their silence, where one may be cut).
 class Encoder {
 public:
-    explicit Encoder(ChunkQueue& q) : queue(q) {}
+    explicit Encoder(ChunkQueue& q) : queue_(q) {}
     virtual ~Encoder() = default;
     virtual void feed(const uint8_t* pcm, size_t n) = 0;   // s16le interleaved
-    // The phone's audio: fed through the gate below (silence while hushed, then a fade-in).
-    void write(const uint8_t* pcm, size_t n);
+    // Audio fed but not yet in the queue comes out as silence (the old song after a skip).
+    virtual void discard_buffered() {}
     virtual const Bytes& silence_chunk() const = 0;
     // A chunk may be cut at multiples of this (one PCM frame); 0: only whole chunks (MP3 frames).
     virtual size_t cut_bytes() const { return 0; }
-
-    // While the phone changes track it still sends the old one for a moment, and the encoder
-    // holds what it sent before: the radio would play the old song's tail at the start of the
-    // new file. hush() silences the phone's audio from now on, and what is still inside the
-    // encoder, for at most max_s. release() fades the phone back in after delay_s.
-    void hush(double max_s);
-    void release(double delay_s);
-    bool hushed() const;
-
-    uint32_t byte_rate = 0;                                  // encoded bytes per second
-    ChunkQueue& queue;
+    uint32_t byte_rate() const { return byte_rate_; }      // encoded bytes per second
 
 protected:
-    virtual void discard_buffered() {}     // audio fed but not yet in the queue becomes silence
-    int fade_samples_ = 2 * 1323;        // the fade-in: 30 ms of stereo 44.1 kHz
-
-private:
-    mutable std::mutex gate_mu_;
-    bool hushed_ = false;
-    double hush_until_ = 0;
-    int fade_ = -1;                      // samples into the fade-in; -1: none
-    Bytes gated_;
+    ChunkQueue& queue_;
+    uint32_t byte_rate_ = 0;
 };
 
 class WavEncoder : public Encoder {
 public:
     WavEncoder(ChunkQueue& q, int rate, int channels);
     void feed(const uint8_t* pcm, size_t n) override;
+    void discard_buffered() override { stale_pending_ = true; }
     const Bytes& silence_chunk() const override { return silence_; }
     size_t cut_bytes() const override { return frame_bytes_; }
 private:
-    void discard_buffered() override { stale_pending_ = true; }
     size_t chunk_bytes_, frame_bytes_;
     Bytes pending_, silence_;
     std::atomic<bool> stale_pending_{false};
@@ -94,17 +81,17 @@ public:
     Mp3Encoder(ChunkQueue& q, int rate, int channels, int kbps, const std::string& command);
     ~Mp3Encoder() override;
     void feed(const uint8_t* pcm, size_t n) override;
+    void discard_buffered() override;
     const Bytes& silence_chunk() const override { return silence_; }
 private:
     void reader();
-    void discard_buffered() override;
     int in_fd_ = -1, out_fd_ = -1, pid_ = -1;
     int channels_;
     std::thread reader_;
     Bytes silence_, noisy_;
     uint32_t noise_ = 0x12345678;
     // Frames go in and out of lame one for one (1152 samples, no tag frame): the ones that
-    // carry samples fed before a hush come out as silence.
+    // carry samples fed before discard_buffered() come out as silence.
     std::atomic<uint64_t> fed_samples_{0}, stale_frames_{0};
     uint64_t out_frames_ = 0;
 };
@@ -124,13 +111,24 @@ struct DriftOptions {
     double max_ppm = 1000;         // the largest correction either loop applies
 };
 
+struct StreamConfig {
+    std::string format = "wav";    // wav | mp3
+    int rate = 44100, channels = 2;
+    int mp3_kbps = 256;
+    std::string mp3_command;       // "": lame with the options the stream needs
+    DriftOptions drift;
+    double idle_fill_s = 0.25;     // silence once the phone has sent nothing this long
+};
+
+// The audio box: the phone's PCM, corrected for clock drift and muted around skips, encoded
+// into the chunk queue the radio's reads drain. Owns the queue and the encoder.
 class LiveStream {
 public:
-    LiveStream(Encoder& enc, int rate, int channels, DriftOptions drift = {},
-               double idle_fill_s = 0.25);
+    explicit LiveStream(const StreamConfig& cfg);
     ~LiveStream();
-    void start();
+    void start();                  // the clock thread: silence while the phone sends nothing
     void stop();
+
     // PCM from the phone (any thread), resampled to the radio's clock.
     void write_pcm(const uint8_t* data, size_t n);
     // The phone's timeline for drift correction (a2dp.h): the next write_pcm starts at this
@@ -138,12 +136,25 @@ public:
     // taken to run on the Pi's clock.
     void phone_timing(uint64_t position, double arrival);
     void phone_reset();            // a new stream from the phone: positions start over
+
+    // While the phone changes track it still sends the old one for a moment, and the encoder
+    // holds what it sent before: the radio would play the old song's tail at the start of the
+    // new file. mute_phone() silences the phone's audio from now on, and what is still inside
+    // the encoder, for at most max_s. unmute_phone() fades the phone back in after after_s.
+    void mute_phone(double max_s);
+    void unmute_phone(double after_s);
+    bool phone_muted() const;
+
     StreamStatus status() const;
-    Encoder& encoder;
+    ChunkQueue& queue() { return queue_; }
+    Encoder& encoder() { return *encoder_; }
 
 private:
     void clock_loop();
+    void feed_phone(const uint8_t* pcm, size_t n);   // through the mute gate
     double out_scale() const;      // radio samples per Pi-clock sample, with mu_ held
+    ChunkQueue queue_;
+    std::unique_ptr<Encoder> encoder_;
     mutable std::mutex mu_;
     int rate_, channels_, frame_bytes_;
     DriftOptions drift_;
@@ -158,4 +169,11 @@ private:
     bool stop_ = false;
     std::condition_variable stop_cv_;
     std::thread thread_;
+    // The mute gate (its own lock: the Player sets it while the stream works).
+    mutable std::mutex gate_mu_;
+    bool muted_ = false;
+    double mute_until_ = 0;
+    int fade_ = -1;                // samples into the fade-in; -1: none
+    int fade_samples_;             // the fade-in: 30 ms at 44.1 kHz
+    Bytes gated_;
 };

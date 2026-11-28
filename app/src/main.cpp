@@ -70,6 +70,18 @@ PlayerConfig player_config(const Config& c) {
     return p;
 }
 
+StreamConfig stream_config(const Config& c, const PlayerConfig& pc) {
+    StreamConfig s;
+    s.format = pc.format;
+    s.rate = pc.rate;
+    s.channels = pc.channels;
+    s.mp3_kbps = c.num("audio.mp3_kbps", s.mp3_kbps);
+    s.mp3_command = c.str("audio.mp3_command", "");
+    s.drift.enabled = c.flag("audio.drift_correction", s.drift.enabled);
+    s.drift.radio_period_s = c.real("audio.drift_period_s", s.drift.radio_period_s);
+    return s;
+}
+
 BluezOptions bluez_options(const Config& c) {
     BluezOptions b;
     b.alias = c.str("bluetooth.alias", b.alias);
@@ -138,13 +150,13 @@ int write_image(FatVolume& vol, const std::string& path) {
 
 // The whole volume as a sparse image, each file's data region filled with silence rather than
 // waiting for live audio.
-int dump_image(FatVolume& vol, Encoder& enc, ChunkQueue& queue, const std::string& path) {
+int dump_image(FatVolume& vol, LiveStream& stream, const std::string& path) {
     g_log_level = 0;
     std::atomic<bool> done{false};
     std::thread feeder([&] {
         Bytes z(65536, 0);
         while (!done) {
-            if (queue.backlog() < (4u << 20)) enc.feed(z.data(), z.size());
+            if (stream.queue().backlog() < (4u << 20)) stream.encoder().feed(z.data(), z.size());
             else usleep(200);
         }
     });
@@ -237,18 +249,7 @@ int main(int argc, char** argv) {
          pc.files, pc.target_latency_s * 1000, pc.restart_threshold_s, pc.phone_restart_s,
          pc.skip_mute ? "on" : "off", pc.skip_mute_s * 1000, pc.pause_after_s, pc.tags.c_str(),
          cfg.str("bluetooth.codecs", kDefaultCodecs).c_str(), g_trace ? ", trace" : "");
-    ChunkQueue queue;
-    std::unique_ptr<Encoder> enc;
-    if (pc.format == "mp3")
-        enc = std::make_unique<Mp3Encoder>(queue, pc.rate, pc.channels, cfg.num("audio.mp3_kbps", 256),
-                                           cfg.str("audio.mp3_command", ""));
-    else
-        enc = std::make_unique<WavEncoder>(queue, pc.rate, pc.channels);
-
-    DriftOptions drift;
-    drift.enabled = cfg.flag("audio.drift_correction", drift.enabled);
-    drift.radio_period_s = cfg.real("audio.drift_period_s", drift.radio_period_s);
-    LiveStream stream(*enc, pc.rate, pc.channels, drift);
+    LiveStream stream(stream_config(cfg, pc));
     bool live = dump.empty();
     std::unique_ptr<A2dpSink> a2dp;
     if (live && tone <= 0)
@@ -268,7 +269,7 @@ int main(int argc, char** argv) {
         control = std::make_unique<NullControl>();
     }
 
-    Player player(pc, *enc, *control);
+    Player player(pc, stream, *control);
     player.on_latency = [&](double s) {
         if (a2dp) a2dp->set_delay(s * 1000);
     };
@@ -276,7 +277,7 @@ int main(int argc, char** argv) {
     FatVolume vol(player.make_files(), fo);
     LOGI("volume: %s, %d x %s files of %u MiB, %.1f GiB", fo.fat32 ? "FAT32" : "FAT16", pc.files,
          pc.format.c_str(), player.file_size() >> 20, vol.total_sectors() * kSector / 1073741824.0);
-    if (!live) return dump_image(vol, *enc, queue, dump);
+    if (!live) return dump_image(vol, stream, dump);
 
     stream.start();
     if (tone > 0) std::thread(play_tone, std::ref(stream), tone, pc.rate, pc.channels).detach();
@@ -295,8 +296,9 @@ int main(int argc, char** argv) {
             StreamStatus st = stream.status();
             LOGT("state: file %d at %.1f s, backlog %.2f s, underruns %u, skips %u, %s, "
                  "phone %s, clocks %+.0f/%+.0f ppm", player.current() + 1,
-                 double(player.data().watermark()) / enc->byte_rate,
-                 double(queue.backlog()) / enc->byte_rate, player.data().underruns(),
+                 double(player.data().watermark()) / stream.encoder().byte_rate(),
+                 double(stream.queue().backlog()) / stream.encoder().byte_rate(),
+                 player.data().underruns(),
                  player.data().skips(), st.source_active ? "audio" : "no audio",
                  control->status().c_str(), st.phone_ppm, st.radio_ppm);
         }

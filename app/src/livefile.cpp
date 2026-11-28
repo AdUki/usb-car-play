@@ -2,9 +2,10 @@
 
 #include <cstring>
 
-LiveFileData::LiveFileData(Encoder& enc, uint32_t size, uint32_t align, double target_latency_s,
+LiveFileData::LiveFileData(LiveStream& stream, uint32_t size, uint32_t align, double target_latency_s,
                            double max_block_s, size_t cache_bytes)
-    : enc_(enc), size_(size), align_(align), base_target_(size_t(target_latency_s * enc.byte_rate)),
+    : q_(stream.queue()), enc_(stream.encoder()), size_(size), align_(align),
+      base_target_(size_t(target_latency_s * enc_.byte_rate())),
       target_(base_target_), cache_limit_(cache_bytes), max_block_(max_block_s) {}
 
 void LiveFileData::reset(bool continuous) {
@@ -48,7 +49,7 @@ void LiveFileData::start_live() {
         // out before it opened this file: the delay is unchanged, so fill() leaves it alone
         // until the radio has read past it (within reason).
         continuous_ = false;
-        grace_ = std::min(enc_.queue.backlog(), size_t(10 * enc_.byte_rate));
+        grace_ = std::min(q_.backlog(), size_t(10 * enc_.byte_rate()));
         if (!carry_.empty() && carry_.size() <= size_ - watermark_) {
             append(watermark_, carry_);
             watermark_ += uint32_t(carry_.size());
@@ -60,10 +61,10 @@ void LiveFileData::start_live() {
     // Hand the radio exactly target_ of audio ahead of live: what is older is stale, and what is
     // missing is made up with silence (in whole chunks). That fixes the latency at the target,
     // which is also the delay reported to the phone. After Next/Previous, all of it silence.
-    size_t dropped = enc_.queue.trim_to(silent_ ? 0 : target_);
-    size_t backlog = enc_.queue.backlog();
+    size_t dropped = q_.trim_to(silent_ ? 0 : target_);
+    size_t backlog = q_.backlog();
     size_t pad = backlog < target_ ? pad_silence(target_ - backlog) : 0;
-    double br = enc_.byte_rate;
+    double br = enc_.byte_rate();
     LOGT("file start at %u%s: %.2f s dropped, %.2f s live + %.2f s silence",
          watermark_ - uint32_t(pad), silent_ ? " (silent)" : "", dropped / br, backlog / br, pad / br);
 }
@@ -84,18 +85,18 @@ void LiveFileData::grow_for(size_t n) {
     // grows its reads to its largest soon (Linux: 16 KiB, 64 KiB, then 120 KiB), so the cushion
     // goes up once to cover 128 KiB, plus a second for the host's own buffering to fill from.
     if (!max_target_ || n <= target_) return;
-    size_t want = base_target_ + enc_.byte_rate + std::max<size_t>(n, 128u << 10);
+    size_t want = base_target_ + enc_.byte_rate() + std::max<size_t>(n, 128u << 10);
     want = std::min(want, std::max(max_target_, target_));
     if (want <= target_) return;
     size_t more = want - target_;
     target_ = want;
-    double br = enc_.byte_rate;
+    double br = enc_.byte_rate();
     LOGI("the host reads %.2f s at once: latency raised to %.2f s", n / br, target_ / br);
     if (!started_) return;    // start_live() puts the new cushion in front
     // Mid-file: the reader falls behind live by silence put in at the watermark (a gap, once).
     // To the radio clock that is a step in the backlog, like a cut: it settles again around it.
     size_t pad = pad_silence(more);
-    enc_.queue.mark_discontinuity();
+    q_.mark_discontinuity();
     LOGT("%.2f s of silence put in at %u", pad / br, watermark_ - uint32_t(pad));
 }
 
@@ -133,16 +134,16 @@ void LiveFileData::fill(uint32_t end) {
     // radio stays close to live instead of playing stale audio.
     size_t need = end - watermark_;
     size_t slack = 4 * enc_.silence_chunk().size();
-    size_t backlog = enc_.queue.backlog();
+    size_t backlog = q_.backlog();
     size_t grace = watermark_ < grace_ ? grace_ : 0;
     if (backlog > need + 2 * target_ + slack + grace) {
-        size_t dropped = enc_.queue.trim_to(target_ + need);
+        size_t dropped = q_.trim_to(target_ + need);
         skips_++;
-        LOGI("radio fell behind live, skipped %.2f s", double(dropped) / enc_.byte_rate);
+        LOGI("radio fell behind live, skipped %.2f s", double(dropped) / enc_.byte_rate());
     }
     Bytes chunk;
     while (watermark_ < end) {
-        if (!enc_.queue.get(chunk, max_block_)) {
+        if (!q_.get(chunk, max_block_)) {
             // Nothing was produced for max_block_ seconds. The PCM clock should make that
             // impossible, but never leave the radio hanging.
             underruns_++;

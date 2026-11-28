@@ -174,8 +174,12 @@ double mean_between(const std::vector<std::pair<double, size_t>>& v, double a, d
 int run_drift_sim() {
     const double phone_ppm = 1500, radio_ppm = -2500, seconds = 30;
     int failures_before = g_failures;
-    ChunkQueue q;
-    WavEncoder enc(q, 44100, 2);
+    StreamConfig sc;
+    sc.drift.radio_period_s = 10;  // minutes in real life; seconds here
+    sc.drift.max_ppm = 5000;
+    LiveStream stream(sc);
+    ChunkQueue& q = stream.queue();
+    Encoder& enc = stream.encoder();
     SimPhone phone;
     PlayerConfig cfg;
     cfg.files = 8;
@@ -186,14 +190,10 @@ int run_drift_sim() {
     // A cushion bigger than the radio's buffer (below): the radio's buffer stays full and its
     // reads come at its own pace, so its clock shows. With a smaller cushion it would wait on us.
     cfg.target_latency_s = 0.8;
-    Player player(cfg, enc, phone);
+    Player player(cfg, stream, phone);
     FatVolume vol(player.make_files(), FatOptions{});
     ScsiDisk disk(vol, "Generic", "USB Flash Disk", "0123456789AB", false);
     disk.on_mount = [&] { player.on_mount(); };
-    DriftOptions drift;
-    drift.radio_period_s = 10;     // minutes in real life; seconds here
-    drift.max_ppm = 5000;
-    LiveStream stream(enc, 44100, 2, drift);
     stream.start();
 
     // The phone: a 440 Hz sine by its own (fast) clock, with its timeline like A2DP's.
@@ -230,7 +230,7 @@ int run_drift_sim() {
             if (getenv("DRIFT_VERBOSE") && backlog.size() % 50 == 0) {
                 StreamStatus st = stream.status();
                 fprintf(stderr, "t=%4.1f backlog %.3f phone %+6.0f radio %+6.0f trim %+6.0f %s\n",
-                        now_s() - t_play, q.backlog() / double(enc.byte_rate), st.phone_ppm,
+                        now_s() - t_play, q.backlog() / double(enc.byte_rate()), st.phone_ppm,
                         st.radio_ppm, st.trim_ppm, st.radio_locked ? "locked" : "settling");
             }
             usleep(20000);
@@ -242,8 +242,8 @@ int run_drift_sim() {
     Segment s = radio.play(0, seconds, hdr);
     monitor.join();
 
-    double early = mean_between(backlog, 6, 12) / enc.byte_rate;
-    double late = mean_between(backlog, seconds - 6, seconds) / enc.byte_rate;
+    double early = mean_between(backlog, 6, 12) / enc.byte_rate();
+    double late = mean_between(backlog, seconds - 6, seconds) / enc.byte_rate();
     double uncorrected = (phone_ppm - radio_ppm) * 1e-6 * (seconds - 9);
     double f = frequency(s.left, s.left.size() - 44100, 44100);
     StreamStatus st = stream.status();
@@ -269,8 +269,9 @@ int run_drift_sim() {
 
 int run_radio_sim() {
     int failures_before = g_failures;
-    ChunkQueue q;
-    WavEncoder enc(q, 44100, 2);
+    LiveStream stream{StreamConfig{}};
+    ChunkQueue& q = stream.queue();
+    Encoder& enc = stream.encoder();
     SimPhone phone;
     PlayerConfig cfg;
     cfg.files = 8;
@@ -282,11 +283,10 @@ int run_radio_sim() {
     cfg.pause_after_s = 0;
     cfg.restart_threshold_s = 3;     // this radio restarts a track 3 s in
     if (getenv("SKIP_MUTE_OFF")) cfg.skip_mute = false;
-    Player player(cfg, enc, phone);
+    Player player(cfg, stream, phone);
     FatVolume vol(player.make_files(), FatOptions{});
     ScsiDisk disk(vol, "Generic", "USB Flash Disk", "0123456789AB", false);
     disk.on_mount = [&] { player.on_mount(); };
-    LiveStream stream(enc, 44100, 2);
     stream.start();
 
     // The phone: 1 s of silence, then the sine of its current track, paced by the wall clock.
@@ -387,7 +387,7 @@ int run_radio_sim() {
            "Sony-like Next %.2f s silence then %.0f Hz with %d clicks, "
            "underruns %d (%.2f s), dropped %.2f s, commands [%s], FAT sector reads %u: %s\n",
            latency, f1, f2, f3, gap2, f2_start, gap4, f4_start, clicks4, radio.underruns, radio.underrun_s,
-           double(q.dropped_total()) / enc.byte_rate, sent.c_str(), fs.fat_reads,
+           double(q.dropped_total()) / enc.byte_rate(), sent.c_str(), fs.fat_reads,
            g_failures == failures_before ? "ok" : "FAILED");
     stop = true;
     source.join();

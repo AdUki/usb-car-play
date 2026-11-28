@@ -18,9 +18,9 @@ Player::Layout Player::layout_for(const PlayerConfig& cfg) {
     return l;
 }
 
-Player::Player(const PlayerConfig& cfg, Encoder& enc, MediaControl& control)
-    : cfg_(cfg), enc_(enc), control_(control), lay_(layout_for(cfg)),
-      data_(enc, lay_.data, lay_.align, cfg.target_latency_s, cfg.max_block_s, cfg.cache_bytes),
+Player::Player(const PlayerConfig& cfg, LiveStream& stream, MediaControl& control)
+    : cfg_(cfg), stream_(stream), enc_(stream.encoder()), control_(control), lay_(layout_for(cfg)),
+      data_(stream, lay_.data, lay_.align, cfg.target_latency_s, cfg.max_block_s, cfg.cache_bytes),
       guard_until_(now_s() + cfg.guard_s) {
     data_.set_max_latency(cfg.max_latency_s);
     latency_ = data_.latency_s();
@@ -240,11 +240,11 @@ void Player::read_file(int i, uint32_t offset, uint8_t* dst, size_t n) {
                 // The radio streams the new file: fade the phone in once it has switched too.
                 radio_live_ = true;
                 double done = phone_done_at_;
-                if (done > 0) enc_.release(std::max(0.0, done + cfg_.skip_mute_s - now_s()));
+                if (done > 0) stream_.unmute_phone(std::max(0.0, done + cfg_.skip_mute_s - now_s()));
                 LOGT("radio streams file %d%s", i + 1, done > 0 ? ": phone back in" : "");
             }
             // Two seconds of audio: more than a tag scan or a host's filesystem probe reads.
-            uint64_t settle = std::max<uint64_t>(256 * 1024, 2ull * enc_.byte_rate);
+            uint64_t settle = std::max<uint64_t>(256 * 1024, 2ull * enc_.byte_rate());
             if (!settled_ && !guard && data_.watermark() >= settle) {
                 settled_ = true;
                 event("radio plays file " + std::to_string(i + 1));
@@ -288,7 +288,7 @@ void Player::peek_file(int i, uint32_t offset, uint8_t* dst, size_t n) {
 void Player::on_other_file(int i) {
     int cur = current_;
     int n = cfg_.files;
-    uint64_t near_end = std::max<uint64_t>(4u << 20, 10ull * enc_.byte_rate);
+    uint64_t near_end = std::max<uint64_t>(4u << 20, 10ull * enc_.byte_rate());
     if (i == (cur + 1) % n && data_.watermark() + near_end >= lay_.data) {
         event("radio reached the end of file " + std::to_string(cur + 1));
         switch_to(i, true);
@@ -307,7 +307,7 @@ void Player::on_other_file(int i) {
 void Player::maybe_restart(int i) {
     if (!cfg_.restart_is_previous) return;
     // What the radio has read of the file: what it played, plus its buffer.
-    double played = double(data_.watermark()) / enc_.byte_rate;
+    double played = double(data_.watermark()) / enc_.byte_rate();
     double now = now_s();
     char buf[160];
     if (played < cfg_.restart_threshold_s) {
@@ -334,7 +334,7 @@ void Player::maybe_restart(int i) {
     trace_reads("restart");
     if (!control_.connected()) return;
     command("restart");
-    hush_until_switched(1, true);
+    mute_until_switched(1, true);
 }
 
 double Player::pause_threshold() const {
@@ -353,7 +353,7 @@ void Player::send_and_wait(const std::vector<std::string>& cmds) {
     if (!control_.connected() || cmds.empty()) return;
     uint64_t v = control_.track_version();
     for (auto& c : cmds) command(c);
-    hush_until_switched(cmds.size());     // after: the watcher must find them queued
+    mute_until_switched(cmds.size());     // after: the watcher must find them queued
     // Only tags that follow the track need the phone's new one before the header is answered.
     if (cfg_.metadata_wait_s > 0 && cfg_.tags == "track") {
         // The phone carries them out one after another, each in a few tenths of a second.
@@ -394,7 +394,7 @@ void Player::trace_reads(const char* why) {
     }
 }
 
-void Player::hush_until_switched(size_t steps, bool restart) {
+void Player::mute_until_switched(size_t steps, bool restart) {
     // The phone carries them out one after another, each within 1.5 s (Bluez::run_commands),
     // a Previous that only restarted the song in twice that. A restart keeps the title, and
     // Android often does not report the position going back to 0 (the step then waits out its
@@ -408,7 +408,7 @@ void Player::hush_until_switched(size_t steps, bool restart) {
         data_.next_start_silent();
         // Longer than the wait for the phone: the radio may take seconds to stream the file
         // (the Sony: 3 s from opening it). Without either, the phone comes back after that.
-        enc_.hush(max + 10);
+        stream_.mute_phone(max + 10);
         LOGT("phone muted until it has switched and the radio streams");
     }
     std::lock_guard<std::mutex> lk(watch_mu_);
@@ -443,7 +443,7 @@ void Player::watch_loop() {
         double now = now_s();
         phone_switched_at_ = now;
         phone_done_at_ = now;
-        if (cfg_.skip_mute && radio_live_) enc_.release(cfg_.skip_mute_s);
+        if (cfg_.skip_mute && radio_live_) stream_.unmute_phone(cfg_.skip_mute_s);
         char buf[96];
         snprintf(buf, sizeof buf, done ? "phone switched after %.2f s"
                                   : restart ? "phone restarted its song (%.2f s)"

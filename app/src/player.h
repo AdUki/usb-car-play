@@ -83,7 +83,7 @@ struct PlayerConfig {
 
 class Player {
 public:
-    Player(const PlayerConfig& cfg, Encoder& enc, MediaControl& control);
+    Player(const PlayerConfig& cfg, LiveStream& stream, MediaControl& control);
     ~Player();
 
     std::vector<VirtualFile> make_files();
@@ -111,7 +111,7 @@ private:
     double pause_threshold() const;          // no reads this long: the radio is away
     void switch_to(int i, bool continuous = false);
     void send_and_wait(const std::vector<std::string>& cmds);
-    void hush_until_switched(size_t steps, bool restart = false);   // see skip_mute
+    void mute_until_switched(size_t steps, bool restart = false);   // see skip_mute
     void watch_loop();                       // unmutes when the phone has switched
     void trace_reads(const char* why);       // log.trace: the radio's reads of the last seconds
     void command(const std::string& c);
@@ -123,7 +123,8 @@ private:
     void latency_changed();
 
     PlayerConfig cfg_;
-    Encoder& enc_;
+    LiveStream& stream_;
+    const Encoder& enc_;
     MediaControl& control_;
     struct Layout {
         std::string ext;

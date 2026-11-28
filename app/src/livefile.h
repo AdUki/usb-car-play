@@ -21,7 +21,7 @@
 
 class LiveFileData {
 public:
-    LiveFileData(Encoder& enc, uint32_t size, uint32_t align, double target_latency_s,
+    LiveFileData(LiveStream& stream, uint32_t size, uint32_t align, double target_latency_s,
                  double max_block_s, size_t cache_bytes);
 
     // continuous: the next file follows the previous one gaplessly (it ended, nothing skipped).
@@ -37,11 +37,11 @@ public:
     void read(uint32_t offset, uint8_t* dst, size_t n);
 
     // Raise the cushion for hosts that read more at once than it holds, up to max_s (0: never).
-    void set_max_latency(double max_s) { max_target_ = size_t(max_s * enc_.byte_rate); }
+    void set_max_latency(double max_s) { max_target_ = size_t(max_s * enc_.byte_rate()); }
     // A new host (USB reconnected): back to target_latency_s.
     void restore_latency() { target_ = base_target_; }
     // How far behind live the radio starts a file (the delay to report to the phone).
-    double latency_s() const { return double(target_) / enc_.byte_rate; }
+    double latency_s() const { return double(target_) / enc_.byte_rate(); }
 
     uint32_t watermark() const { return watermark_; }
     uint32_t size() const { return size_; }
@@ -56,7 +56,8 @@ private:
     void grow_for(size_t n);
     size_t pad_silence(size_t bytes);
 
-    Encoder& enc_;
+    ChunkQueue& q_;
+    const Encoder& enc_;
     uint32_t size_, align_;
     size_t base_target_, target_, max_target_ = 0, cache_limit_;
     double max_block_;

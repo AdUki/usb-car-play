@@ -72,60 +72,12 @@ void ChunkQueue::clear() {
     stats_.discontinuities++;
 }
 
-// ------------------------------------------------------------------------------ Encoder
-
-void Encoder::hush(double max_s) {
-    {
-        std::lock_guard<std::mutex> lk(gate_mu_);
-        hushed_ = true;
-        hush_until_ = now_s() + max_s;
-        fade_ = -1;
-    }
-    discard_buffered();
-}
-
-void Encoder::release(double delay_s) {
-    std::lock_guard<std::mutex> lk(gate_mu_);
-    if (hushed_) hush_until_ = std::min(hush_until_, now_s() + delay_s);
-}
-
-bool Encoder::hushed() const {
-    std::lock_guard<std::mutex> lk(gate_mu_);
-    return hushed_;
-}
-
-void Encoder::write(const uint8_t* pcm, size_t n) {
-    std::unique_lock<std::mutex> lk(gate_mu_);
-    if (hushed_ && now_s() >= hush_until_) {
-        hushed_ = false;
-        fade_ = 0;
-    }
-    if (!hushed_ && fade_ < 0) {
-        lk.unlock();
-        feed(pcm, n);
-        return;
-    }
-    gated_.assign(pcm, pcm + n);
-    int16_t* s = reinterpret_cast<int16_t*>(gated_.data());
-    size_t count = n / 2;
-    if (hushed_) {
-        memset(s, 0, count * 2);
-    } else {
-        for (size_t i = 0; i < count && fade_ >= 0; i++) {
-            s[i] = int16_t(s[i] * (double(fade_) / fade_samples_));
-            if (++fade_ >= fade_samples_) fade_ = -1;
-        }
-    }
-    lk.unlock();
-    feed(gated_.data(), n);
-}
-
 // ------------------------------------------------------------------------------ WAV
 
 WavEncoder::WavEncoder(ChunkQueue& q, int rate, int channels) : Encoder(q) {
     frame_bytes_ = 2 * size_t(channels);
     chunk_bytes_ = 1152 * frame_bytes_;
-    byte_rate = rate * 2 * channels;
+    byte_rate_ = rate * 2 * channels;
     silence_.assign(chunk_bytes_, 0);
 }
 
@@ -134,7 +86,7 @@ void WavEncoder::feed(const uint8_t* pcm, size_t n) {
     pending_.insert(pending_.end(), pcm, pcm + n);
     size_t whole = pending_.size() / chunk_bytes_ * chunk_bytes_;
     for (size_t i = 0; i < whole; i += chunk_bytes_)
-        queue.put(Bytes(pending_.begin() + i, pending_.begin() + i + chunk_bytes_));
+        queue_.put(Bytes(pending_.begin() + i, pending_.begin() + i + chunk_bytes_));
     pending_.erase(pending_.begin(), pending_.begin() + whole);
 }
 
@@ -142,8 +94,7 @@ void WavEncoder::feed(const uint8_t* pcm, size_t n) {
 
 Mp3Encoder::Mp3Encoder(ChunkQueue& q, int rate, int channels, int kbps, const std::string& command)
     : Encoder(q), channels_(channels) {
-    byte_rate = kbps * 1000 / 8;
-    fade_samples_ = channels * 1323;
+    byte_rate_ = kbps * 1000 / 8;
     silence_ = silent_mp3_frame(kbps, rate, channels == 2);
     std::string cmd = command;
     if (cmd.empty()) {
@@ -217,16 +168,21 @@ void Mp3Encoder::reader() {
     while ((n = ::read(out_fd_, buf, sizeof buf)) > 0)
         for (auto& f : split.feed(buf, n)) {
             if (out_frames_++ < stale_frames_) f = silence_;
-            queue.put(std::move(f));
+            queue_.put(std::move(f));
         }
 }
 
 // ------------------------------------------------------------------------------ LiveStream
 
-LiveStream::LiveStream(Encoder& enc, int rate, int channels, DriftOptions drift, double idle_fill_s)
-    : encoder(enc), rate_(rate), channels_(channels), frame_bytes_(2 * channels), drift_(drift),
-      idle_fill_(idle_fill_s), pts_(rate), radio_(drift.radio_period_s, drift.max_ppm),
-      resampler_(channels) {}
+LiveStream::LiveStream(const StreamConfig& c)
+    : rate_(c.rate), channels_(c.channels), frame_bytes_(2 * c.channels), drift_(c.drift),
+      idle_fill_(c.idle_fill_s), pts_(c.rate), radio_(c.drift.radio_period_s, c.drift.max_ppm),
+      resampler_(c.channels), fade_samples_(c.channels * 1323) {
+    if (c.format == "mp3")
+        encoder_ = std::make_unique<Mp3Encoder>(queue_, c.rate, c.channels, c.mp3_kbps, c.mp3_command);
+    else
+        encoder_ = std::make_unique<WavEncoder>(queue_, c.rate, c.channels);
+}
 
 LiveStream::~LiveStream() { stop(); }
 
@@ -282,9 +238,9 @@ void LiveStream::write_pcm(const uint8_t* data, size_t n) {
         resampled_.clear();
         resampler_.process(reinterpret_cast<const int16_t*>(partial_.data()), whole / frame_bytes_,
                            ratio, resampled_);
-        encoder.write(reinterpret_cast<const uint8_t*>(resampled_.data()), resampled_.size() * 2);
+        feed_phone(reinterpret_cast<const uint8_t*>(resampled_.data()), resampled_.size() * 2);
     } else {
-        encoder.write(partial_.data(), whole);
+        feed_phone(partial_.data(), whole);
     }
     partial_.erase(partial_.begin(), partial_.begin() + whole);
 }
@@ -299,7 +255,7 @@ void LiveStream::clock_loop() {
         stop_cv_.wait_for(lk, std::chrono::milliseconds(20));
         if (stop_) break;
         double now = now_s();
-        if (drift_.enabled) radio_.update(now, encoder.queue.take_read_stats(), encoder.byte_rate);
+        if (drift_.enabled) radio_.update(now, queue_.take_read_stats(), encoder_->byte_rate());
         if (drift_.enabled && source_active_ && now - last_log >= 60) {   // quiet while idle
             last_log = now;
             LOGI("clock: phone %+.0f ppm%s, radio %+.0f ppm%s", pts_.ppm(),
@@ -322,6 +278,54 @@ void LiveStream::clock_loop() {
         if (frames < 256) continue;
         produced += double(frames) / rate_;
         zeros.assign(size_t(frames) * frame_bytes_, 0);
-        encoder.feed(zeros.data(), zeros.size());
+        encoder_->feed(zeros.data(), zeros.size());
     }
+}
+
+// ------------------------------------------------------------------------------ the mute gate
+
+void LiveStream::mute_phone(double max_s) {
+    {
+        std::lock_guard<std::mutex> lk(gate_mu_);
+        muted_ = true;
+        mute_until_ = now_s() + max_s;
+        fade_ = -1;
+    }
+    encoder_->discard_buffered();
+}
+
+void LiveStream::unmute_phone(double after_s) {
+    std::lock_guard<std::mutex> lk(gate_mu_);
+    if (muted_) mute_until_ = std::min(mute_until_, now_s() + after_s);
+}
+
+bool LiveStream::phone_muted() const {
+    std::lock_guard<std::mutex> lk(gate_mu_);
+    return muted_;
+}
+
+void LiveStream::feed_phone(const uint8_t* pcm, size_t n) {
+    std::unique_lock<std::mutex> lk(gate_mu_);
+    if (muted_ && now_s() >= mute_until_) {
+        muted_ = false;
+        fade_ = 0;
+    }
+    if (!muted_ && fade_ < 0) {
+        lk.unlock();
+        encoder_->feed(pcm, n);
+        return;
+    }
+    gated_.assign(pcm, pcm + n);
+    int16_t* s = reinterpret_cast<int16_t*>(gated_.data());
+    size_t count = n / 2;
+    if (muted_) {
+        memset(s, 0, count * 2);
+    } else {
+        for (size_t i = 0; i < count && fade_ >= 0; i++) {
+            s[i] = int16_t(s[i] * (double(fade_) / fade_samples_));
+            if (++fade_ >= fade_samples_) fade_ = -1;
+        }
+    }
+    lk.unlock();
+    encoder_->feed(gated_.data(), n);
 }
