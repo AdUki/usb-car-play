@@ -185,7 +185,7 @@ int main(int argc, char** argv) {
             StreamStatus st = stream.status();
             LOGT("state: file %d at %.1f s, backlog %.2f s, underruns %u, skips %u, %s, "
                  "phone %s, clocks %+.0f/%+.0f ppm", player.current() + 1,
-                 double(player.data().watermark()) / stream.encoder().byte_rate(),
+                 double(player.data().filled_to()) / stream.encoder().byte_rate(),
                  double(stream.queue().backlog()) / stream.encoder().byte_rate(),
                  player.data().underruns(),
                  player.data().skips(), st.source_active ? "audio" : "no audio",

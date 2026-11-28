@@ -9,7 +9,7 @@ LiveFileData::LiveFileData(LiveStream& stream, uint32_t size, uint32_t align, do
       target_(base_target_), cache_limit_(cache_bytes), max_block_(max_block_s) {}
 
 void LiveFileData::reset(bool continuous) {
-    watermark_ = 0;
+    filled_to_ = 0;
     started_ = false;
     continuous_ = continuous;
     grace_ = 0;
@@ -50,9 +50,9 @@ void LiveFileData::start_live() {
         // until the radio has read past it (within reason).
         continuous_ = false;
         grace_ = std::min(q_.backlog(), size_t(10 * enc_.byte_rate()));
-        if (!carry_.empty() && carry_.size() <= size_ - watermark_) {
-            append(watermark_, carry_);
-            watermark_ += uint32_t(carry_.size());
+        if (!carry_.empty() && carry_.size() <= size_ - filled_to_) {
+            append(filled_to_, carry_);
+            filled_to_ += uint32_t(carry_.size());
         }
         carry_.clear();
         return;
@@ -66,16 +66,16 @@ void LiveFileData::start_live() {
     size_t pad = backlog < target_ ? pad_silence(target_ - backlog) : 0;
     double br = enc_.byte_rate();
     LOGT("file start at %u%s: %.2f s dropped, %.2f s live + %.2f s silence",
-         watermark_ - uint32_t(pad), silent_ ? " (silent)" : "", dropped / br, backlog / br, pad / br);
+         filled_to_ - uint32_t(pad), silent_ ? " (silent)" : "", dropped / br, backlog / br, pad / br);
 }
 
 size_t LiveFileData::pad_silence(size_t bytes) {
-    // Whole chunks of silence at the watermark, as many as fit in `bytes` (and in the file).
+    // Whole chunks of silence at filled_to_, as many as fit in `bytes` (and in the file).
     const Bytes& silence = enc_.silence_chunk();
     size_t pad = 0;
-    for (; pad + silence.size() <= bytes && silence.size() <= size_ - watermark_; pad += silence.size()) {
-        append(watermark_, silence);
-        watermark_ += uint32_t(silence.size());
+    for (; pad + silence.size() <= bytes && silence.size() <= size_ - filled_to_; pad += silence.size()) {
+        append(filled_to_, silence);
+        filled_to_ += uint32_t(silence.size());
     }
     return pad;
 }
@@ -93,11 +93,11 @@ void LiveFileData::grow_for(size_t n) {
     double br = enc_.byte_rate();
     LOGI("the host reads %.2f s at once: latency raised to %.2f s", n / br, target_ / br);
     if (!started_) return;    // start_live() puts the new cushion in front
-    // Mid-file: the reader falls behind live by silence put in at the watermark (a gap, once).
+    // Mid-file: the reader falls behind live by silence put in at filled_to_ (a gap, once).
     // To the radio clock that is a step in the backlog, like a cut: it settles again around it.
     size_t pad = pad_silence(more);
     q_.mark_discontinuity();
-    LOGT("%.2f s of silence put in at %u", pad / br, watermark_ - uint32_t(pad));
+    LOGT("%.2f s of silence put in at %u", pad / br, filled_to_ - uint32_t(pad));
 }
 
 void LiveFileData::read(uint32_t offset, uint8_t* dst, size_t n) {
@@ -108,13 +108,13 @@ void LiveFileData::read(uint32_t offset, uint8_t* dst, size_t n) {
     }
     uint32_t end = uint32_t(end64);
     grow_for(end - offset);
-    if (offset > watermark_ || (!segs_.empty() && offset < segs_.begin()->first)) {
+    if (offset > filled_to_ || (!segs_.empty() && offset < segs_.begin()->first)) {
         // The radio skipped ahead (resume after power-up, fast forward, first read mid-file), or
         // back behind what is kept (it came back from another source and starts the file over):
-        // carry on live from there rather than read silence until it is back at the watermark.
+        // carry on live from there rather than read silence until it is back at filled_to_.
         uint32_t to = offset - offset % align_;
-        LOGD("jump %u -> %u", watermark_, to);
-        watermark_ = to;
+        LOGD("jump %u -> %u", filled_to_, to);
+        filled_to_ = to;
         continuous_ = false;
         segs_.clear();
         cached_ = 0;
@@ -123,7 +123,7 @@ void LiveFileData::read(uint32_t offset, uint8_t* dst, size_t n) {
         start_live();
     }
     started_ = true;
-    if (end > watermark_) fill(end);
+    if (end > filled_to_) fill(end);
     from_cache(offset, dst, end - offset);
     if (end - offset < n) memset(dst + (end - offset), 0, n - (end - offset));
 }
@@ -132,17 +132,17 @@ void LiveFileData::fill(uint32_t end) {
     // The radio stopped reading for a while (pause, menu, source switch), or the phone's clock
     // runs faster than the radio's: the backlog is beyond what this read needs. Skip ahead so the
     // radio stays close to live instead of playing stale audio.
-    size_t need = end - watermark_;
+    size_t need = end - filled_to_;
     size_t slack = 4 * enc_.silence_chunk().size();
     size_t backlog = q_.backlog();
-    size_t grace = watermark_ < grace_ ? grace_ : 0;
+    size_t grace = filled_to_ < grace_ ? grace_ : 0;
     if (backlog > need + 2 * target_ + slack + grace) {
         size_t dropped = q_.trim_to(target_ + need);
         skips_++;
         LOGI("radio fell behind live, skipped %.2f s", double(dropped) / enc_.byte_rate());
     }
     Bytes chunk;
-    while (watermark_ < end) {
+    while (filled_to_ < end) {
         if (!q_.get(chunk, max_block_)) {
             // Nothing was produced for max_block_ seconds. The PCM clock should make that
             // impossible, but never leave the radio hanging.
@@ -151,7 +151,7 @@ void LiveFileData::fill(uint32_t end) {
         } else {
             live_ = true;
         }
-        uint32_t room = size_ - watermark_;
+        uint32_t room = size_ - filled_to_;
         if (chunk.size() > room) {
             // The file ends inside this chunk: what fits goes here, the rest starts the next
             // file if the radio moves on to it (WAV). MP3 frames can't be cut: silence.
@@ -161,7 +161,7 @@ void LiveFileData::fill(uint32_t end) {
             chunk.resize(keep);
             chunk.resize(room, 0);
         }
-        append(watermark_, chunk);
-        watermark_ += chunk.size();
+        append(filled_to_, chunk);
+        filled_to_ += chunk.size();
     }
 }

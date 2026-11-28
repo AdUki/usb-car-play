@@ -159,7 +159,7 @@ void Player::read_file(int i, uint32_t offset, uint8_t* dst, size_t n) {
         if (tail_bytes_ > tail_run) near_tail = false;
     }
     auto is_probe = [&] {
-        return near_tail && i == current_ && uint64_t(data_.watermark()) + 2 * tail_zone < lay_.data;
+        return near_tail && i == current_ && uint64_t(data_.filled_to()) + 2 * tail_zone < lay_.data;
     };
 
     // The log file's trace of what the radio does: where each run of reads starts.
@@ -212,7 +212,7 @@ void Player::read_file(int i, uint32_t offset, uint8_t* dst, size_t n) {
             if (restart_away_) switch_to(i);
             else maybe_restart(i);
         }
-    } else if (near_start && data_.watermark() > (offset < hdr_end ? 0 : offset - hdr_end) + 65536) {
+    } else if (near_start && data_.filled_to() > (offset < hdr_end ? 0 : offset - hdr_end) + 65536) {
         // Back at the start of the file it is playing: a restart, or a look at the first frames
         // before a seek. The next read tells; this one is silence either way.
         restart_pending_ = true;
@@ -245,7 +245,7 @@ void Player::read_file(int i, uint32_t offset, uint8_t* dst, size_t n) {
             }
             // Two seconds of audio: more than a tag scan or a host's filesystem probe reads.
             uint64_t settle = std::max<uint64_t>(256 * 1024, 2ull * enc_.byte_rate());
-            if (!settled_ && !guard && data_.watermark() >= settle) {
+            if (!settled_ && !guard && data_.filled_to() >= settle) {
                 settled_ = true;
                 event("radio plays file " + std::to_string(i + 1));
             }
@@ -289,7 +289,7 @@ void Player::on_other_file(int i) {
     int cur = current_;
     int n = cfg_.files;
     uint64_t near_end = std::max<uint64_t>(4u << 20, 10ull * enc_.byte_rate());
-    if (i == (cur + 1) % n && data_.watermark() + near_end >= lay_.data) {
+    if (i == (cur + 1) % n && data_.filled_to() + near_end >= lay_.data) {
         event("radio reached the end of file " + std::to_string(cur + 1));
         switch_to(i, true);
         return;
@@ -307,7 +307,7 @@ void Player::on_other_file(int i) {
 void Player::maybe_restart(int i) {
     if (!cfg_.restart_is_previous) return;
     // What the radio has read of the file: what it played, plus its buffer.
-    double played = double(data_.watermark()) / enc_.byte_rate();
+    double played = double(data_.filled_to()) / enc_.byte_rate();
     double now = now_s();
     char buf[160];
     if (played < cfg_.restart_threshold_s) {

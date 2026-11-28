@@ -3,7 +3,7 @@
 // The radio reads a file from its start, mostly sequentially and ahead of real time. It starts
 // target_latency_s ahead of live (trimmed or padded to that), or, when the previous file just
 // ran out, exactly where that one stopped (no gap). Then live chunks are assigned to
-// file offsets the first time the radio asks for them (the watermark);
+// file offsets the first time the radio asks for them (filled_to() is how far that has got);
 // recently assigned bytes are kept so re-reads return the same data. Reads behind the cache, or
 // gaps the radio jumps over, read as silence.
 //
@@ -43,7 +43,7 @@ public:
     // How far behind live the radio starts a file (the delay to report to the phone).
     double latency_s() const { return double(target_) / enc_.byte_rate(); }
 
-    uint32_t watermark() const { return watermark_; }
+    uint32_t filled_to() const { return filled_to_; }
     uint32_t size() const { return size_; }
     uint32_t underruns() const { return underruns_; }
     uint32_t skips() const { return skips_; }
@@ -61,7 +61,7 @@ private:
     uint32_t size_, align_;
     size_t base_target_, target_, max_target_ = 0, cache_limit_;
     double max_block_;
-    uint32_t watermark_ = 0;
+    uint32_t filled_to_ = 0;
     bool started_ = false;
     bool continuous_ = false;
     size_t grace_ = 0;      // after a gapless switch: backlog that is not stale (see start_live)

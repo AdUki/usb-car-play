@@ -258,7 +258,7 @@ static void test_start_cushion() {
         LiveFileData d(s, 64 << 20, 4, target, 0.01, 8 << 20);
         Bytes b(cushion);
         d.read(0, b.data(), b.size());
-        CHECK_EQ(d.watermark(), uint32_t(cushion));
+        CHECK_EQ(d.filled_to(), uint32_t(cushion));
         CHECK_EQ(d.underruns(), 0u);   // served at once, not after waiting for live audio
         CHECK(std::all_of(b.begin(), b.end(), [](uint8_t v) { return v == 0; }));
         Bytes live(chunk, 0x55);
@@ -342,10 +342,10 @@ static void test_big_reads() {
         d.read(0, b.data(), b.size());
         CHECK(near(d.latency_s(), raised));
         CHECK_EQ(d.underruns(), 0u);
-        CHECK(d.watermark() + chunk > uint32_t(raised * br));   // the cushion, all silence
+        CHECK(d.filled_to() + chunk > uint32_t(raised * br));   // the cushion, all silence
         Bytes live(size_t(raised * br) / chunk * chunk, 0x55);
         enc.feed(live.data(), live.size());
-        const uint32_t cushion_end = d.watermark();
+        const uint32_t cushion_end = d.filled_to();
         for (uint32_t at = 65536; at + 65536 <= cushion_end; at += 65536) d.read(at, b.data(), b.size());
         Bytes big(122880);
         d.read(cushion_end, big.data(), big.size());     // 120 KiB: from the queue, at once
@@ -367,7 +367,7 @@ static void test_big_reads() {
         CHECK(near(d.latency_s(), target));
     }
     {
-        // Mid-file (a host whose reads grow after the start): silence goes in at the watermark,
+        // Mid-file (a host whose reads grow after the start): silence goes in at filled_to(),
         // once, and the radio clock is told the backlog stepped.
         LiveStream s{StreamConfig{}};
         ChunkQueue& q = s.queue();
@@ -379,15 +379,15 @@ static void test_big_reads() {
         Bytes b(chunk);
         d.read(0, b.data(), b.size());
         CHECK_EQ(b[0], 0x66);
-        uint32_t wm = d.watermark();
+        uint32_t filled = d.filled_to();
         q.take_read_stats();
         Bytes big(65536);
-        d.read(wm, big.data(), big.size());
+        d.read(filled, big.data(), big.size());
         CHECK(near(d.latency_s(), raised));
         CHECK_EQ(d.underruns(), 0u);
         CHECK(big[0] == 0 && big.back() == 0);             // 1.7 s of silence first
         CHECK(q.take_read_stats().discontinuities >= 1);
-        CHECK(d.watermark() >= wm + uint32_t((raised - target - 0.03) * br));
+        CHECK(d.filled_to() >= filled + uint32_t((raised - target - 0.03) * br));
     }
     {
         // Capped, and off.
@@ -434,7 +434,7 @@ struct PlayerRig {
     // The radio plays `seconds` of file `file` from wherever it is.
     void play(int file, double seconds) {
         uint32_t bytes = uint32_t(seconds * 176400);
-        uint32_t start = player->current() == file ? player->data().watermark() + 44 : 44;
+        uint32_t start = player->current() == file ? player->data().filled_to() + 44 : 44;
         for (uint32_t o = start; o < start + bytes; o += 65536) read(file, o, 65536);
     }
 };
@@ -505,7 +505,7 @@ static void test_player() {
         r.read(1, 512, 65536);
         r.read(1, 512 + 65536, 65536);
         CHECK_EQ(r.phone.sent_str(), std::string(""));
-        CHECK(r.player->data().watermark() < 3 * 65536);    // live again from the start
+        CHECK(r.player->data().filled_to() < 3 * 65536);    // live again from the start
         auto ev = r.player->events();
         CHECK(std::any_of(ev.begin(), ev.end(), [](auto& e) { return e.find("nothing to send") != std::string::npos; }));
 
@@ -628,14 +628,14 @@ static void test_player() {
         r.read(1, 0, 4096);
         Bytes tail = r.read(1, r.player->file_size() - 512, 512);
         r.read(1, 4096, 65536);
-        CHECK(r.player->data().watermark() < 4096 + 65536 + 8192);
+        CHECK(r.player->data().filled_to() < 4096 + 65536 + 8192);
         CHECK_EQ(r.phone.sent_str(), std::string("next"));     // and no bogus "previous"
         r.play(1, 4);
         r.phone.clear();
         r.read(2, r.player->file_size() - 512, 512);           // the tail first, then the start
         r.read(2, 0, 4096);
         r.read(2, 4096, 65536);
-        CHECK(r.player->data().watermark() < 4096 + 65536 + 8192);
+        CHECK(r.player->data().filled_to() < 4096 + 65536 + 8192);
         CHECK_EQ(r.phone.sent_str(), std::string("next"));
         r.phone.clear();
     }
@@ -681,7 +681,7 @@ static void test_player() {
         // played yet is still there.
         PlayerRig r;
         r.play(0, 3);
-        uint32_t w = r.player->data().watermark();
+        uint32_t w = r.player->data().filled_to();
         Bytes before = r.read(0, 44 + w - 65536, 65536);
         r.phone.clear();
         usleep(300000);
@@ -698,7 +698,7 @@ static void test_player() {
         r.read(0, 44, 65536);
         Bytes b = r.read(0, 44 + 65536, 65536);
         CHECK_EQ(r.phone.sent_str(), std::string(""));
-        CHECK(r.player->data().watermark() < 3 * 65536 + 44);
+        CHECK(r.player->data().filled_to() < 3 * 65536 + 44);
         CHECK(std::count(b.begin(), b.end(), 0x55) > 0);
     }
     {
@@ -710,14 +710,14 @@ static void test_player() {
             Bytes b = r.read(f, r.player->header_size(), 131072);
             CHECK(std::all_of(b.begin(), b.end(), [](uint8_t v) { return v == 0; }));
         }
-        CHECK_EQ(r.player->data().watermark(), 0u);
+        CHECK_EQ(r.player->data().filled_to(), 0u);
         CHECK_EQ(r.phone.sent_str(), std::string(""));
         Bytes live(176400, 0x44);
         r.enc.feed(live.data(), live.size());
         r.read(2, r.player->header_size() + 131072, 65536);   // the radio picks file 3: silence
         r.read(2, r.player->header_size() + 196608, 65536);   // and plays on: live from here
         CHECK_EQ(r.player->current(), 2);
-        CHECK(r.player->data().watermark() > 196608);
+        CHECK(r.player->data().filled_to() > 196608);
         CHECK_EQ(r.phone.sent_str(), std::string(""));
     }
     {
@@ -730,7 +730,7 @@ static void test_player() {
         const uint32_t from = r.player->header_size() + r.player->data_size() - (600u << 10);
         r.read(1, 0, 4096);
         for (uint32_t o = from; o + 16384 <= r.player->file_size(); o += 16384) r.read(1, o, 16384);
-        CHECK(r.player->data().watermark() + (600u << 10) > r.player->data_size());
+        CHECK(r.player->data().filled_to() + (600u << 10) > r.player->data_size());
         CHECK_EQ(r.phone.sent_str(), std::string("next"));
         r.phone.clear();
         r.read(2, 0, 4096);
@@ -743,7 +743,7 @@ static void test_player() {
         PlayerRig r(8);
         r.play(0, 1);
         r.play(0, double(r.player->data_size()) / 176400 + 1);
-        CHECK(r.player->data().watermark() >= r.player->data_size() - 65536);
+        CHECK(r.player->data().filled_to() >= r.player->data_size() - 65536);
         r.phone.clear();
         r.read(1, 0, 512);
         r.read(1, 44, 65536);
