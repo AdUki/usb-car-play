@@ -153,12 +153,24 @@ libfreeaptx). LiveStream is `stream` and `drift`. Player is `player`, `livefile`
 
 ### Booting
 
-The stick boots straight into btdisk and bluetoothd, without systemd: `btdisk-init` mounts what is
-needed, sets up the USB gadget and starts btdisk, then D-Bus and bluetoothd, and restarts any
-of them that exits. On the bench (systemd image before it: about 22 s) the
-phone connected about 8 s after power-on. The kernel is cut down for this too (LZ4, no
-tracing, security modules, netfilter or IPv6). `make image DEV=1` keeps systemd, with Wi-Fi
-and ssh.
+The image holds only what the stick needs, and the path from power to music is cut short. It
+boots in about 4 s, and the phone is connected about 5 s after power-on.
+
+- **Firmware straight to the kernel**: no U-Boot, no initramfs, no splash, no boot delay, and the
+  CPU in turbo mode for the first seconds.
+- **A small kernel**: LZ4-compressed, which unpacks several times faster than gzip on the ARM11.
+  The USB gadget and the Bluetooth core are built in. Sound, graphics, tracing, security modules,
+  netfilter, IPv6 and SCSI are left out.
+- **No init system**: `btdisk-init` is PID 1. It loads the Bluetooth driver in the background,
+  sets up the USB gadget and starts btdisk first, so the radio sees the stick while the rest
+  starts. Then come D-Bus and bluetoothd, and any of them that exits is restarted.
+- **Four programs**: btdisk, D-Bus, bluetoothd (Classic only, without the plugins for profiles a
+  car stick never offers) and a login on the serial console. No audio server, no network, and
+  Wi-Fi is off.
+- **Read-only**: the root is mounted read-only, the pairings live on a small `/data` partition
+  and the log in RAM, so cutting the power is always safe.
+
+`make image DEV=1` builds a development image instead, with systemd, Wi-Fi and ssh.
 
 ## Develop
 
