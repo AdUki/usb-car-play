@@ -20,7 +20,7 @@ SRC_URI = " \
 "
 S = "${WORKDIR}/app"
 
-inherit cmake systemd pkgconfig
+inherit cmake systemd pkgconfig deploy
 
 EXTRA_OECMAKE = "-DCMAKE_BUILD_TYPE=Release -DBTDISK_TESTS=OFF -DBTDISK_TOOLS=OFF -DBTDISK_ALL_CODECS=ON \
                  -DBTDISK_VERSION=${BTDISK_VERSION}"
@@ -30,20 +30,31 @@ do_configure:prepend() {
     rm -rf ${S}/build ${S}/build-*
 }
 
-do_install:append() {
-    install -d ${D}${libexecdir}/btdisk ${D}${sysconfdir} ${D}${systemd_system_unitdir}
-    install -m 0755 ${WORKDIR}/scripts/btdisk-gadget ${D}${libexecdir}/btdisk/
-    install -m 0644 ${WORKDIR}/config/btdisk.conf ${D}${sysconfdir}/
+# The settings, made once: /etc/btdisk.conf on the root, and the same file as btdisk.txt on the
+# boot partition, where a PC can edit it (btdisk reads it on top of /etc/btdisk.conf).
+do_compile:append() {
+    cp ${WORKDIR}/config/btdisk.conf ${B}/btdisk.conf
     # make image TRACE=1: the detailed log, with room for a whole drive of it (btdisk-init then
     # keeps the system log in /data as well).
     if [ "${BTDISK_TRACE}" = "1" ]; then
         sed -i -e 's/^trace = false/trace = true/' -e 's/^file_kb = .*/file_kb = 3072/' \
-            -e 's|^file =.*|file = /data/btdisk.log|' ${D}${sysconfdir}/btdisk.conf
-        grep -q '^trace = true' ${D}${sysconfdir}/btdisk.conf && grep -q '^file = /data/btdisk.log' \
-            ${D}${sysconfdir}/btdisk.conf || bbfatal "btdisk.conf: no trace or file key to set"
+            -e 's|^file =.*|file = /data/btdisk.log|' ${B}/btdisk.conf
+        grep -q '^trace = true' ${B}/btdisk.conf && grep -q '^file = /data/btdisk.log' \
+            ${B}/btdisk.conf || bbfatal "btdisk.conf: no trace or file key to set"
     fi
+}
+
+do_install:append() {
+    install -d ${D}${libexecdir}/btdisk ${D}${sysconfdir} ${D}${systemd_system_unitdir}
+    install -m 0755 ${WORKDIR}/scripts/btdisk-gadget ${D}${libexecdir}/btdisk/
+    install -m 0644 ${B}/btdisk.conf ${D}${sysconfdir}/
     install -m 0644 ${WORKDIR}/btdisk.service ${D}${systemd_system_unitdir}/
 }
+
+do_deploy() {
+    install -m 0644 ${B}/btdisk.conf ${DEPLOYDIR}/btdisk.txt
+}
+addtask deploy after do_compile before do_build
 
 SYSTEMD_SERVICE:${PN} = "btdisk.service"
 SYSTEMD_AUTO_ENABLE = "enable"

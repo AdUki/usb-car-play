@@ -48,6 +48,10 @@ btdisk_trim_boot() {
 }
 ROOTFS_POSTPROCESS_COMMAND += "btdisk_trim_boot;"
 
+# The settings a PC can edit, on the boot partition (btdisk.bb deploys them).
+IMAGE_BOOT_FILES:append = " btdisk.txt"
+do_image_wic[depends] += "btdisk:do_deploy"
+
 WKS_FILE = "${BTDISK_WKS}"
 IMAGE_FSTYPES = "wic.bz2 wic.bmap"
 WIC_CREATE_EXTRA_ARGS += "--no-fstab-update"

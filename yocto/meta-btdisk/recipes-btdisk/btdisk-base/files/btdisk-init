@@ -30,10 +30,14 @@ chmod 1777 /var/volatile/tmp
 # the rest starts.
 modprobe hci_uart &
 
+# The settings a PC can edit: btdisk.txt on the boot partition, read-only (a power cut can't harm
+# it, and a FAT the PC left unclean still mounts). btdisk reads it on top of /etc/btdisk.conf.
+mountpoint -q /boot || mount -t vfat -o ro,noatime /dev/mmcblk0p1 /boot
+
 # The radio next: it sees the stick while the rest starts. btdisk runs ahead of everything else
 # on the single core (its A2DP reader raises itself to SCHED_FIFO).
 /usr/libexec/btdisk/btdisk-gadget setup
-respawn sh -c 'renice -n -10 -p $$ >/dev/null; exec /usr/bin/btdisk -c /etc/btdisk.conf 2>&1 | logger -t btdisk'
+respawn sh -c 'renice -n -10 -p $$ >/dev/null; exec /usr/bin/btdisk -c /etc/btdisk.conf -c /boot/btdisk.txt 2>&1 | logger -t btdisk'
 
 # /var/lib in RAM, filled from the image (D-Bus and BlueZ keep state there), then the pairings
 # from /data on /var/lib/bluetooth.
@@ -41,12 +45,14 @@ mkdir -p /var/volatile/lib
 cp -a /var/lib/. /var/volatile/lib/
 mount --bind /var/volatile/lib /var/lib
 /usr/libexec/btdisk/btdisk-data
-# make image TRACE=1 (log.trace in btdisk.conf): the system log (bluetoothd, the kernel's through
+# make image TRACE=1 (log.trace in btdisk.conf, or set on the card): the system log (bluetoothd, the kernel's through
 # klogd, btdisk's stderr) goes to /data too, kept across power cuts like btdisk's own log. From
 # here on, as early as /data is there. Otherwise it is a RAM buffer (logread), started below.
 # (syslogd and klogd are busybox applets without links of their own on the image.)
 SYSLOG_TO_DATA=
-if grep -q '^trace *= *true' /etc/btdisk.conf 2>/dev/null && mountpoint -q /data; then
+# The card's btdisk.txt has the last word, as it has for btdisk.
+if grep -h '^trace *=' /etc/btdisk.conf /boot/btdisk.txt 2>/dev/null | tail -n 1 | grep -Eiq '= *(true|yes|on|1)' &&
+    mountpoint -q /data; then
     SYSLOG_TO_DATA=1
     busybox syslogd -O /data/syslog.log -s 2048 -b 1
     busybox klogd

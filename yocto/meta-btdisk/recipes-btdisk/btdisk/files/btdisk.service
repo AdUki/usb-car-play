@@ -11,8 +11,10 @@ Before=shutdown.target
 
 [Service]
 Type=simple
+# The settings a PC can edit, on the boot partition (read-only): read on top of /etc/btdisk.conf.
+ExecStartPre=-/bin/sh -c 'mountpoint -q /boot || mount -t vfat -o ro,noatime /dev/mmcblk0p1 /boot'
 ExecStartPre=/usr/libexec/btdisk/btdisk-gadget setup
-ExecStart=/usr/bin/btdisk -c /etc/btdisk.conf
+ExecStart=/usr/bin/btdisk -c /etc/btdisk.conf -c /boot/btdisk.txt
 ExecStopPost=/usr/libexec/btdisk/btdisk-gadget teardown
 Restart=always
 RestartSec=1
