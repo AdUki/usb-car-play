@@ -39,9 +39,11 @@ make image                      # read-only image (DEV=1 adds Wi-Fi and ssh, TRA
 make flash DISK=/dev/sdX
 ```
 
-Plug the Pi's **USB** port (not PWR) into the radio. Within 3 minutes of power-on, pair your
+Plug the Pi's **USB** port (not PWR) into the radio. Within 5 minutes of power-on, pair your
 phone with **Car USB**. No PIN is needed.
-After power-on it calls the phone that was connected last, every 5 s for the first 3 minutes.
+After power-on it calls the phone that was connected last for the first 10 s (`autoconnect_s`),
+until a phone connects. After that it calls no phone again until the next
+power-on: disconnect it on the phone and it stays disconnected.
 
 ### Settings
 

@@ -1,7 +1,7 @@
 /// @file
 /// The phone side over BlueZ's D-Bus API (sd-bus): the phone's AVRCP player (track metadata,
 /// status, next/previous/play/pause), a NoInputNoOutput pairing agent, adapter setup and
-/// reconnecting to paired phones.
+/// calling the paired phones after power-on.
 #pragma once
 
 #include "player.h"
@@ -24,12 +24,13 @@ struct BluezOptions
 	std::string alias = "Car USB";
 	/// accept pairing without a PIN
 	bool agent = true;
-	/// after start; 0 = always, < 0 = never
-	double discoverable_s = 180;
+	/// discoverable and pairable for this long after start; 0 = while no phone is connected,
+	/// < 0 = never
+	double discoverable_s = 300;
 	/// ask for the central role on links we accept
 	bool central = true;
-	/// try paired phones this often while none is connected
-	double reconnect_s = 15;
+	/// call the paired phones for this long after start, until one connects; 0 = never
+	double autoconnect_s = 10;
 	/// the phone connected last, tried first ("": not kept)
 	std::string last_phone_file;
 };
@@ -71,7 +72,9 @@ private:
 	{
 		std::string address, name;
 		bool connected = false, paired = false, trusted = false;
-		double connected_at = 0, profile_tried = 0;
+		double connected_at = 0;
+		/// on this connection: A2DP came up / was asked for once
+		bool had_audio = false, profile_tried = false;
 	};
 	struct PlayerObj
 	{
@@ -87,10 +90,13 @@ private:
 	void adapter_added(const std::string& path, bool powered);
 	/// alias, pairable, discoverable
 	void configure_adapter(const std::string& path, bool powered);
+	/// discoverable_s = 0: discoverable and pairable while no phone is connected (force: set
+	/// it even if unchanged)
+	void update_visibility(bool force);
 	bool set_adapter_prop(const std::string& path, bool warn, const char* name, const char* type,
 	                      ...);
 	void set_central(const std::string& adapter);
-	void reconnect();
+	void autoconnect();
 	/// with p_mu held
 	void recompute();
 	/// with p_mu held
@@ -110,6 +116,10 @@ private:
 	size_t p_reconnect_idx = 0;
 	double p_last_reconnect = 0;
 	double p_started = 0;
+	/// with p_mu: a phone has connected since start, so no phone is called again
+	bool p_had_phone = false;
+	/// the bus thread: what update_visibility() set last
+	bool p_visible = false;
 	/// a Connect is out (it takes up to a page timeout)
 	bool p_connecting = false;
 	/// address

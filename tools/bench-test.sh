@@ -59,7 +59,7 @@ wav_info = true
 agent = false
 alias = btbench-rpi
 discoverable_s = -1
-reconnect_s = 0
+autoconnect_s = 0
 EOF
 on 'mkdir -p /tmp/btdisk /tmp/radio'
 scp $SSH_OPTS -q "$ARM/btdisk.stripped" root@$BENCH:/tmp/btdisk/btdisk

@@ -90,7 +90,7 @@ BluezOptions bluez_options(const Config& c)
 	b.agent = c.flag("bluetooth.agent", b.agent);
 	b.discoverable_s = c.real("bluetooth.discoverable_s", b.discoverable_s);
 	b.central = c.flag("bluetooth.central", b.central);
-	b.reconnect_s = c.real("bluetooth.reconnect_s", b.reconnect_s);
+	b.autoconnect_s = c.real("bluetooth.autoconnect_s", b.autoconnect_s);
 	b.last_phone_file = c.str("bluetooth.last_phone_file", "/data/last-phone");
 	return b;
 }

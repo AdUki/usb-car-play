@@ -302,7 +302,7 @@ void Bluez::bluez_owner_changed(bool present)
 	}
 	sd_bus_message_unref(reply);
 	p_last_reconnect = now_s();
-	reconnect();
+	autoconnect();
 	if (p_opt.agent) {
 		r = sd_bus_call_method(p_bus, kBluez, "/org/bluez", "org.bluez.AgentManager1",
 		                       "RegisterAgent", &err, nullptr, "os", kAgentPath, "NoInputNoOutput");
@@ -354,19 +354,59 @@ bool Bluez::set_adapter_prop(const std::string& path, bool warn, const char* nam
 
 void Bluez::configure_adapter(const std::string& path, bool powered)
 {
-	bool ok = set_adapter_prop(path, true, "Alias", "s", p_opt.alias.c_str());
-	ok &= set_adapter_prop(path, true, "Pairable", "b", 1);
-	if (!powered) return;
-	if (p_opt.discoverable_s >= 0) {
-		ok &= set_adapter_prop(path, true, "DiscoverableTimeout", "u",
-		                       uint32_t(p_opt.discoverable_s));
-		ok &= set_adapter_prop(path, true, "Discoverable", "b", 1);
+	set_adapter_prop(path, true, "Alias", "s", p_opt.alias.c_str());
+	// Discoverable needs a powered adapter: this is called again once it is. discoverable_s < 0
+	// leaves both as bluetoothd has them (not discoverable; the bench runs its own agent).
+	if (!powered || p_opt.discoverable_s < 0) return;
+	if (p_opt.discoverable_s == 0) {
+		set_adapter_prop(path, true, "PairableTimeout", "u", 0u);
+		set_adapter_prop(path, true, "DiscoverableTimeout", "u", 0u);
+		update_visibility(true);
+		return;
 	}
-	if (ok && p_opt.discoverable_s > 0)
-		LOGI("bluetooth: \"%s\", discoverable for %.0f s", p_opt.alias.c_str(),
-		     p_opt.discoverable_s);
-	else if (ok)
-		LOGI("bluetooth: \"%s\"", p_opt.alias.c_str());
+	// The window counts from power-on, also when bluetoothd powers the adapter again later.
+	double left = p_opt.discoverable_s - (now_s() - p_started);
+	if (left >= 1) {
+		auto s = uint32_t(left);
+		bool ok = set_adapter_prop(path, true, "PairableTimeout", "u", s);
+		// Busy while bluetoothd's own Pairable from powering on is still with the kernel.
+		bool pairable = false;
+		for (int i = 0; i < 10 && !pairable; i++) {
+			if (i) usleep(50000);
+			pairable = set_adapter_prop(path, i == 9, "Pairable", "b", 1);
+		}
+		ok &= pairable;
+		ok &= set_adapter_prop(path, true, "DiscoverableTimeout", "u", s);
+		ok &= set_adapter_prop(path, true, "Discoverable", "b", 1);
+		if (ok)
+			LOGI("bluetooth: \"%s\", discoverable and pairable for %u s", p_opt.alias.c_str(), s);
+	} else {
+		set_adapter_prop(path, true, "Discoverable", "b", 0);
+		set_adapter_prop(path, true, "Pairable", "b", 0);
+		LOGI("bluetooth: \"%s\", not discoverable or pairable", p_opt.alias.c_str());
+	}
+}
+
+void Bluez::update_visibility(bool force)
+{
+	// discoverable_s = 0: discoverable and pairable whenever no phone is connected.
+	if (p_opt.discoverable_s != 0) return;
+	std::vector<std::string> adapters;
+	bool visible = true;
+	{
+		std::lock_guard<std::mutex> lk(p_mu);
+		adapters.assign(p_adapters.begin(), p_adapters.end());
+		for (auto& [path, d] : p_devices)
+			if (d.connected) visible = false;
+	}
+	if (!force && visible == p_visible) return;
+	p_visible = visible;
+	for (auto& a : adapters) {
+		set_adapter_prop(a, true, "Pairable", "b", int(visible));
+		set_adapter_prop(a, true, "Discoverable", "b", int(visible));
+	}
+	LOGI("bluetooth: \"%s\", %s", p_opt.alias.c_str(),
+	     visible ? "discoverable and pairable" : "hidden while a phone is connected");
 }
 
 void Bluez::set_central(const std::string& adapter)
@@ -409,6 +449,8 @@ void Bluez::on_props(const std::string& path, const std::string& iface, sd_bus_m
 		{
 			std::lock_guard<std::mutex> lk(p_mu);
 			p_transports.insert(path);
+			auto d = p_devices.find(path.substr(0, path.rfind('/')));
+			if (d != p_devices.end()) d->second.had_audio = true;
 		}
 		if (p_a2dp)
 			p_a2dp->on_transport_props(p_bus, path, m);
@@ -439,7 +481,7 @@ void Bluez::on_props(const std::string& path, const std::string& iface, sd_bus_m
 		// Call the phone now rather than at the next tick: every second counts after power-on.
 		if (powered && p_bluez_up) {
 			p_last_reconnect = now_s();
-			reconnect();
+			autoconnect();
 		}
 		return;
 	}
@@ -470,6 +512,8 @@ void Bluez::on_props(const std::string& path, const std::string& iface, sd_bus_m
 				LOGI("bluetooth: %s %s %s", d.name.c_str(), d.address.c_str(),
 				     d.connected ? "connected" : "disconnected");
 				d.connected_at = d.connected ? now_s() : 0;
+				d.had_audio = d.profile_tried = false;
+				if (d.connected) p_had_phone = true;
 			}
 
 			// The phone to call first next time. A phone pairing anew connects before it is
@@ -516,6 +560,7 @@ void Bluez::on_props(const std::string& path, const std::string& iface, sd_bus_m
 		recompute();
 	}
 	if (!trust_path.empty()) trust(trust_path);
+	if (conn_changed) update_visibility(false);
 }
 
 void Bluez::on_removed(const std::string& path, const std::string& iface)
@@ -603,7 +648,11 @@ int Bluez::Bus::connect_reply(sd_bus_message* m, void* ud, sd_bus_error*)
 
 void Bluez::on_connect_reply(const std::string& path, sd_bus_message* reply)
 {
+	// The next call 5 s after this one ended, not after it started: a call to a phone that is
+	// not there pages for the whole page timeout (5 s), and between the calls the radio is free
+	// for a new phone to find the stick and pair.
 	p_connecting = false;
+	p_last_reconnect = now_s();
 	const sd_bus_error* e = sd_bus_message_get_error(reply);
 	std::string name;
 	{
@@ -646,11 +695,13 @@ std::string Bluez::phone_name()
 	return p_last_phone_name;
 }
 
-void Bluez::reconnect()
+void Bluez::autoconnect()
 {
-	// Like a car kit: while no phone is connected, page the paired ones in turn, the one that
-	// was connected last every other time. A phone connected without audio (A2DP did not come
-	// up with the link) gets A2DP asked for.
+	// After power-on, while no phone has connected yet, page the paired ones in turn, the one
+	// that was connected last every other time. Once a phone has connected none is called again,
+	// so a phone that disconnects (or walks off) stays disconnected until it connects by itself
+	// or the next power-on. A phone connected without audio (A2DP did not come up with the link)
+	// gets A2DP asked for, once: a phone that turned A2DP off later keeps it off.
 	if (p_connecting) return;
 	{
 		std::lock_guard<std::mutex> lk(p_mu);
@@ -661,18 +712,14 @@ void Bluez::reconnect()
 	{
 		std::lock_guard<std::mutex> lk(p_mu);
 		double now = now_s();
-		bool any = false;
 		for (auto& [path, d] : p_devices) {
-			if (!d.connected) continue;
-			any = true;
-			auto t = p_transports.lower_bound(path + "/");
-			bool audio = t != p_transports.end() && t->compare(0, path.size() + 1, path + "/") == 0;
-			if (!audio && d.paired && now - d.connected_at > 10 && now - d.profile_tried > 30) {
-				d.profile_tried = now;
+			if (!d.connected || !d.paired || d.had_audio || d.profile_tried) continue;
+			if (now - d.connected_at > 10) {
+				d.profile_tried = true;
 				repair = path;
 			}
 		}
-		if (!any) {
+		if (!p_had_phone && now - p_started < p_opt.autoconnect_s) {
 			for (auto& [path, d] : p_devices) {
 				if (!d.paired) continue;
 				if (d.address == p_last_phone)
@@ -712,12 +759,10 @@ void Bluez::reconnect()
 
 void Bluez::loop_event(bool tick)
 {
-	// Every few seconds for the first minutes after power-on (the phone comes into the car),
-	// then less often.
-	double every = now_s() - p_started < 180 ? std::min(p_opt.reconnect_s, 5.0) : p_opt.reconnect_s;
-	if (tick && p_opt.reconnect_s > 0 && now_s() - p_last_reconnect >= every) {
+	// Every 5 s after the last call ended: the phone comes into the car after power-on.
+	if (tick && now_s() - p_last_reconnect >= 5) {
 		p_last_reconnect = now_s();
-		reconnect();
+		autoconnect();
 	}
 	if (p_a2dp && p_bluez_up) p_a2dp->apply_delay(p_bus);
 	run_commands();
