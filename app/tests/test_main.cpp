@@ -277,7 +277,7 @@ static void test_big_reads() {
         ChunkQueue q;
         WavEncoder enc(q, 44100, 2);
         LiveFileData d(enc, 64 << 20, 4, target, 0.01, 8 << 20);
-        d.adapt_latency(6);
+        d.set_max_latency(6);
         Bytes b(65536);
         d.read(0, b.data(), b.size());
         CHECK(near(d.latency_s(), raised));
@@ -294,7 +294,7 @@ static void test_big_reads() {
         CHECK(near(d.latency_s(), raised));                // no further step
         d.reset();                                         // the next file keeps it
         CHECK(near(d.latency_s(), raised));
-        d.reset_latency();
+        d.restore_latency();
         CHECK(near(d.latency_s(), target));
     }
     {
@@ -302,7 +302,7 @@ static void test_big_reads() {
         ChunkQueue q;
         WavEncoder enc(q, 44100, 2);
         LiveFileData d(enc, 64 << 20, 4, target, 0.01, 8 << 20);
-        d.adapt_latency(6);
+        d.set_max_latency(6);
         Bytes b(2048);
         for (uint32_t at = 0; at < 64 * 2048; at += 2048) d.read(at, b.data(), b.size());
         CHECK(near(d.latency_s(), target));
@@ -313,20 +313,20 @@ static void test_big_reads() {
         ChunkQueue q;
         WavEncoder enc(q, 44100, 2);
         LiveFileData d(enc, 64 << 20, 4, target, 0.01, 8 << 20);
-        d.adapt_latency(6);
+        d.set_max_latency(6);
         Bytes live(size_t(0.5 * br) / chunk * chunk, 0x66);
         enc.feed(live.data(), live.size());
         Bytes b(chunk);
         d.read(0, b.data(), b.size());
         CHECK_EQ(b[0], 0x66);
         uint32_t wm = d.watermark();
-        q.take_stats();
+        q.take_read_stats();
         Bytes big(65536);
         d.read(wm, big.data(), big.size());
         CHECK(near(d.latency_s(), raised));
         CHECK_EQ(d.underruns(), 0u);
         CHECK(big[0] == 0 && big.back() == 0);             // 1.7 s of silence first
-        CHECK(q.take_stats().resets >= 1);
+        CHECK(q.take_read_stats().discontinuities >= 1);
         CHECK(d.watermark() >= wm + uint32_t((raised - target - 0.03) * br));
     }
     {
@@ -334,7 +334,7 @@ static void test_big_reads() {
         ChunkQueue q;
         WavEncoder enc(q, 44100, 2);
         LiveFileData d(enc, 64 << 20, 4, target, 0.01, 8 << 20), off(enc, 64 << 20, 4, target, 0.01, 8 << 20);
-        d.adapt_latency(1.0);
+        d.set_max_latency(1.0);
         Bytes b(65536);
         d.read(0, b.data(), b.size());
         CHECK(near(d.latency_s(), 1.0));

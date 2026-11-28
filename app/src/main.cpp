@@ -291,13 +291,14 @@ int main(int argc, char** argv) {
             sleep(1);
             player.tick();
             // The trace's heartbeat: where the radio is and how the stream keeps up.
-            if (g_trace && n % 10 == 0)
-                LOGT("state: file %d at %.1f s, backlog %.2f s, underruns %u, skips %u, %s, "
-                     "phone %s, clocks %+.0f/%+.0f ppm", player.current() + 1,
-                     double(player.data().watermark()) / enc->byte_rate,
-                     double(queue.backlog()) / enc->byte_rate, player.data().underruns(),
-                     player.data().skips(), stream.source_active() ? "audio" : "no audio",
-                     control->status().c_str(), stream.phone_ppm(), stream.radio_ppm());
+            if (!g_trace || n % 10) continue;
+            StreamStatus st = stream.status();
+            LOGT("state: file %d at %.1f s, backlog %.2f s, underruns %u, skips %u, %s, "
+                 "phone %s, clocks %+.0f/%+.0f ppm", player.current() + 1,
+                 double(player.data().watermark()) / enc->byte_rate,
+                 double(queue.backlog()) / enc->byte_rate, player.data().underruns(),
+                 player.data().skips(), st.source_active ? "audio" : "no audio",
+                 control->status().c_str(), st.phone_ppm, st.radio_ppm);
         }
     }).detach();
     // USB first, Bluetooth after: the radio enumerates the stick while BlueZ is still coming up.

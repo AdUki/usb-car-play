@@ -24,11 +24,11 @@ public:
     // Drops the oldest chunks until at most max_bytes remain; returns the bytes dropped.
     size_t trim_to(size_t max_bytes);
     void clear();
-    // The backlog stepped without a trim (silence put in front of it): see ReadStats::resets.
-    void note_cut();
+    // The backlog stepped without a trim (silence put in front of it): see ReadStats::discontinuities.
+    void mark_discontinuity();
     uint64_t dropped_total() const { return dropped_; }
     // What the consumer (the radio) did since the last call: drift.h's RadioClock reads it.
-    ReadStats take_stats();
+    ReadStats take_read_stats();
 
 private:
     mutable std::mutex mu_;
@@ -49,7 +49,7 @@ public:
     void write(const uint8_t* pcm, size_t n);
     virtual const Bytes& silence_chunk() const = 0;
     // A chunk may be cut at multiples of this (one PCM frame); 0: only whole chunks (MP3 frames).
-    virtual size_t split_bytes() const { return 0; }
+    virtual size_t cut_bytes() const { return 0; }
 
     // While the phone changes track it still sends the old one for a moment, and the encoder
     // holds what it sent before: the radio would play the old song's tail at the start of the
@@ -63,7 +63,7 @@ public:
     ChunkQueue& queue;
 
 protected:
-    virtual void drop_in_flight() {}     // audio fed but not yet in the queue becomes silence
+    virtual void discard_buffered() {}     // audio fed but not yet in the queue becomes silence
     int fade_samples_ = 2 * 1323;        // the fade-in: 30 ms of stereo 44.1 kHz
 
 private:
@@ -79,9 +79,9 @@ public:
     WavEncoder(ChunkQueue& q, int rate, int channels);
     void feed(const uint8_t* pcm, size_t n) override;
     const Bytes& silence_chunk() const override { return silence_; }
-    size_t split_bytes() const override { return frame_bytes_; }
+    size_t cut_bytes() const override { return frame_bytes_; }
 private:
-    void drop_in_flight() override { stale_pending_ = true; }
+    void discard_buffered() override { stale_pending_ = true; }
     size_t chunk_bytes_, frame_bytes_;
     Bytes pending_, silence_;
     std::atomic<bool> stale_pending_{false};
@@ -97,7 +97,7 @@ public:
     const Bytes& silence_chunk() const override { return silence_; }
 private:
     void reader();
-    void drop_in_flight() override;
+    void discard_buffered() override;
     int in_fd_ = -1, out_fd_ = -1, pid_ = -1;
     int channels_;
     std::thread reader_;
@@ -107,6 +107,15 @@ private:
     // carry samples fed before a hush come out as silence.
     std::atomic<uint64_t> fed_samples_{0}, stale_frames_{0};
     uint64_t out_frames_ = 0;
+};
+
+// How the stream and its two clocks are doing (the log's heartbeat, tests).
+struct StreamStatus {
+    bool source_active = false;    // PCM is coming from the phone (otherwise: silence)
+    double phone_ppm = 0;          // the clocks against the Pi's, + = fast
+    double radio_ppm = 0;
+    double trim_ppm = 0;           // what the radio loop applies now: its estimate + correction
+    bool radio_locked = false;
 };
 
 struct DriftOptions {
@@ -129,11 +138,7 @@ public:
     // taken to run on the Pi's clock.
     void phone_timing(uint64_t position, double arrival);
     void phone_reset();            // a new stream from the phone: positions start over
-    bool source_active() const { return source_active_; }
-    double phone_ppm() const;      // the clocks against the Pi's, + = fast
-    double radio_ppm() const;
-    double trim_ppm() const;       // what the radio loop applies now: its estimate + correction
-    bool radio_locked() const;
+    StreamStatus status() const;
     Encoder& encoder;
 
 private:

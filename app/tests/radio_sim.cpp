@@ -40,7 +40,7 @@ struct SimPhone : MediaControl {
         std::unique_lock<std::mutex> lk(mu);
         return cv.wait_for(lk, std::chrono::duration<double>(t), [&] { return version != v; });
     }
-    bool wait_idle(double t) override {
+    bool wait_commands_done(double t) override {
         std::unique_lock<std::mutex> lk(mu);
         return cv.wait_for(lk, std::chrono::duration<double>(t), [&] { return pending == 0; });
     }
@@ -227,11 +227,12 @@ int run_drift_sim() {
     std::thread monitor([&] {
         while (!stop && now_s() - t_play < seconds) {
             backlog.emplace_back(now_s() - t_play, q.backlog());
-            if (getenv("DRIFT_VERBOSE") && backlog.size() % 50 == 0)
+            if (getenv("DRIFT_VERBOSE") && backlog.size() % 50 == 0) {
+                StreamStatus st = stream.status();
                 fprintf(stderr, "t=%4.1f backlog %.3f phone %+6.0f radio %+6.0f trim %+6.0f %s\n",
-                        now_s() - t_play, q.backlog() / double(enc.byte_rate), stream.phone_ppm(),
-                        stream.radio_ppm(), stream.trim_ppm(),
-                        stream.radio_locked() ? "locked" : "settling");
+                        now_s() - t_play, q.backlog() / double(enc.byte_rate), st.phone_ppm,
+                        st.radio_ppm, st.trim_ppm, st.radio_locked ? "locked" : "settling");
+            }
             usleep(20000);
         }
     });
@@ -245,9 +246,10 @@ int run_drift_sim() {
     double late = mean_between(backlog, seconds - 6, seconds) / enc.byte_rate;
     double uncorrected = (phone_ppm - radio_ppm) * 1e-6 * (seconds - 9);
     double f = frequency(s.left, s.left.size() - 44100, 44100);
-    CHECK(std::fabs(stream.phone_ppm() - phone_ppm) < 100);
+    StreamStatus st = stream.status();
+    CHECK(std::fabs(st.phone_ppm - phone_ppm) < 100);
     // Loose: a loop this fast is noisy. test_drift.cpp checks precision over a simulated hour.
-    CHECK(std::fabs(stream.radio_ppm() - radio_ppm) < 1200);
+    CHECK(std::fabs(st.radio_ppm - radio_ppm) < 1200);
     CHECK(std::fabs(late - early) < uncorrected / 4);
     CHECK_EQ(radio.underruns, 0);
     CHECK_EQ(player.data().skips(), 0u);
@@ -255,7 +257,7 @@ int run_drift_sim() {
     CHECK(std::fabs(f - 440) < 5);
     printf("drift sim: phone %+.0f ppm (measured %+.0f), radio %+.0f ppm (measured %+.0f), "
            "backlog %.3f -> %.3f s (uncorrected: %+.3f s), %.0f Hz, underruns %d: %s\n",
-           phone_ppm, stream.phone_ppm(), radio_ppm, stream.radio_ppm(), early, late, uncorrected,
+           phone_ppm, st.phone_ppm, radio_ppm, st.radio_ppm, early, late, uncorrected,
            f, radio.underruns, g_failures == failures_before ? "ok" : "FAILED");
     stop = true;
     source.join();

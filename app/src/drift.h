@@ -44,7 +44,7 @@ private:
 struct ReadStats {
     uint64_t gets = 0;         // chunks the radio took
     uint64_t waits = 0;        // of those, how many found the queue empty
-    uint64_t resets = 0;       // the backlog was cut (a new file, a skip to live)
+    uint64_t discontinuities = 0;  // the backlog was cut (a new file, a skip to live)
     double backlog_sum = 0;    // queue bytes left after each get, summed
     // Seconds since the producer's last chunk, at each get, summed: the part of a chunk already
     // made. With it the backlog is measured in time, not in steps of a whole chunk (26 ms).

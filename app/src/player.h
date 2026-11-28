@@ -29,7 +29,7 @@ public:
     virtual uint64_t track_version() = 0;            // changes whenever track() does
     virtual bool wait_track_change(uint64_t version, double timeout_s) = 0;
     // Until the Next/Previous sent so far are all carried out (or given up on); false on timeout.
-    virtual bool wait_idle(double timeout_s) { (void)timeout_s; return true; }
+    virtual bool wait_commands_done(double timeout_s) { (void)timeout_s; return true; }
     virtual std::string status() = 0;                // playing, paused, stopped, ...
     virtual bool connected() = 0;
     virtual void command(const std::string& cmd) = 0;  // next previous play pause

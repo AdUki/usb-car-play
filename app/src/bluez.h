@@ -37,7 +37,7 @@ public:
     TrackInfo track() override;
     uint64_t track_version() override;
     bool wait_track_change(uint64_t version, double timeout_s) override;
-    bool wait_idle(double timeout_s) override;
+    bool wait_commands_done(double timeout_s) override;
     std::string status() override;
     bool connected() override;
     void command(const std::string& cmd) override;

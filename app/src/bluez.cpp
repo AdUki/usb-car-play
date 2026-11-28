@@ -724,7 +724,7 @@ bool Bluez::wait_track_change(uint64_t version, double timeout_s) {
     return version_ != version;
 }
 
-bool Bluez::wait_idle(double timeout_s) {
+bool Bluez::wait_commands_done(double timeout_s) {
     std::unique_lock<std::mutex> lk(mu_);
     return cv_.wait_for(lk, std::chrono::duration<double>(timeout_s),
                         [&] { return !step_active_ && commands_.empty(); });

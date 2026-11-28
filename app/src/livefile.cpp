@@ -95,7 +95,7 @@ void LiveFileData::grow_for(size_t n) {
     // Mid-file: the reader falls behind live by silence put in at the watermark (a gap, once).
     // To the radio clock that is a step in the backlog, like a cut: it settles again around it.
     size_t pad = pad_silence(more);
-    enc_.queue.note_cut();
+    enc_.queue.mark_discontinuity();
     LOGT("%.2f s of silence put in at %u", pad / br, watermark_ - uint32_t(pad));
 }
 
@@ -154,7 +154,7 @@ void LiveFileData::fill(uint32_t end) {
         if (chunk.size() > room) {
             // The file ends inside this chunk: what fits goes here, the rest starts the next
             // file if the radio moves on to it (WAV). MP3 frames can't be cut: silence.
-            size_t split = enc_.split_bytes(), keep = split ? room - room % split : 0;
+            size_t split = enc_.cut_bytes(), keep = split ? room - room % split : 0;
             carry_.assign(chunk.begin() + keep, chunk.end());
             if (!split) carry_.clear();
             chunk.resize(keep);

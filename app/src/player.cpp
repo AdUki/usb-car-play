@@ -22,7 +22,7 @@ Player::Player(const PlayerConfig& cfg, Encoder& enc, MediaControl& control)
     : cfg_(cfg), enc_(enc), control_(control), lay_(layout_for(cfg)),
       data_(enc, lay_.data, lay_.align, cfg.target_latency_s, cfg.max_block_s, cfg.cache_bytes),
       guard_until_(now_s() + cfg.guard_s) {
-    data_.adapt_latency(cfg.max_latency_s);
+    data_.set_max_latency(cfg.max_latency_s);
     latency_ = data_.latency_s();
 }
 
@@ -107,7 +107,7 @@ void Player::on_disconnect() {
         paused_by_us_ = true;
     }
     data_.reset();
-    data_.reset_latency();     // the next host may be a radio
+    data_.restore_latency();     // the next host may be a radio
     latency_changed();
     current_ = -1;
     settled_ = false;
@@ -236,7 +236,7 @@ void Player::read_file(int i, uint32_t offset, uint8_t* dst, size_t n) {
             data_.read(uint32_t(a - hdr_end), p, b - a);
             latency_changed();
             note_data_read(now);
-            if (!radio_live_ && data_.live()) {
+            if (!radio_live_ && data_.got_live_audio()) {
                 // The radio streams the new file: fade the phone in once it has switched too.
                 radio_live_ = true;
                 double done = phone_done_at_;
@@ -405,7 +405,7 @@ void Player::hush_until_switched(size_t steps, bool restart) {
     if (cfg_.skip_mute) {
         phone_done_at_ = 0;
         radio_live_ = false;
-        data_.start_silent();
+        data_.next_start_silent();
         // Longer than the wait for the phone: the radio may take seconds to stream the file
         // (the Sony: 3 s from opening it). Without either, the phone comes back after that.
         enc_.hush(max + 10);
@@ -431,7 +431,7 @@ void Player::watch_loop() {
         lk.unlock();
         bool done = false;
         while (!done && now_s() < deadline) {
-            done = control_.wait_idle(std::min(0.1, deadline - now_s()));
+            done = control_.wait_commands_done(std::min(0.1, deadline - now_s()));
             std::lock_guard<std::mutex> g(watch_mu_);
             if (watch_stop_ || watch_gen_ != gen) break;
         }

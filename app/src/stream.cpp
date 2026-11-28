@@ -35,7 +35,7 @@ bool ChunkQueue::get(Bytes& out, double timeout_s) {
     return true;
 }
 
-ReadStats ChunkQueue::take_stats() {
+ReadStats ChunkQueue::take_read_stats() {
     std::lock_guard<std::mutex> lk(mu_);
     ReadStats s = stats_;
     stats_ = {};
@@ -49,7 +49,7 @@ size_t ChunkQueue::backlog() const {
 
 size_t ChunkQueue::trim_to(size_t max_bytes) {
     std::lock_guard<std::mutex> lk(mu_);
-    stats_.resets++;
+    stats_.discontinuities++;
     size_t dropped = 0;
     while (!q_.empty() && bytes_ > max_bytes) {
         bytes_ -= q_.front().size();
@@ -60,16 +60,16 @@ size_t ChunkQueue::trim_to(size_t max_bytes) {
     return dropped;
 }
 
-void ChunkQueue::note_cut() {
+void ChunkQueue::mark_discontinuity() {
     std::lock_guard<std::mutex> lk(mu_);
-    stats_.resets++;
+    stats_.discontinuities++;
 }
 
 void ChunkQueue::clear() {
     std::lock_guard<std::mutex> lk(mu_);
     q_.clear();
     bytes_ = 0;
-    stats_.resets++;
+    stats_.discontinuities++;
 }
 
 // ------------------------------------------------------------------------------ Encoder
@@ -81,7 +81,7 @@ void Encoder::hush(double max_s) {
         hush_until_ = now_s() + max_s;
         fade_ = -1;
     }
-    drop_in_flight();
+    discard_buffered();
 }
 
 void Encoder::release(double delay_s) {
@@ -204,7 +204,7 @@ void Mp3Encoder::feed(const uint8_t* pcm, size_t n) {
     }
 }
 
-void Mp3Encoder::drop_in_flight() {
+void Mp3Encoder::discard_buffered() {
     // Output frame k holds input samples from about 1152 k - 576 (lame's encoder delay) on, and
     // overlaps the frame before: up to two frames past the last sample fed carry the old audio.
     stale_frames_ = fed_samples_ / 1152 + 2;
@@ -245,24 +245,15 @@ double LiveStream::out_scale() const {
     return drift_.enabled ? 1 + radio_.trim_ppm() * 1e-6 : 1;
 }
 
-double LiveStream::phone_ppm() const {
+StreamStatus LiveStream::status() const {
     std::lock_guard<std::mutex> lk(mu_);
-    return std::clamp(pts_.ppm(), -drift_.max_ppm, drift_.max_ppm);
-}
-
-double LiveStream::radio_ppm() const {
-    std::lock_guard<std::mutex> lk(mu_);
-    return radio_.ppm();
-}
-
-double LiveStream::trim_ppm() const {
-    std::lock_guard<std::mutex> lk(mu_);
-    return radio_.trim_ppm();
-}
-
-bool LiveStream::radio_locked() const {
-    std::lock_guard<std::mutex> lk(mu_);
-    return radio_.locked();
+    StreamStatus st;
+    st.source_active = source_active_;
+    st.phone_ppm = std::clamp(pts_.ppm(), -drift_.max_ppm, drift_.max_ppm);
+    st.radio_ppm = radio_.ppm();
+    st.trim_ppm = radio_.trim_ppm();
+    st.radio_locked = radio_.locked();
+    return st;
 }
 
 void LiveStream::phone_reset() {
@@ -308,7 +299,7 @@ void LiveStream::clock_loop() {
         stop_cv_.wait_for(lk, std::chrono::milliseconds(20));
         if (stop_) break;
         double now = now_s();
-        if (drift_.enabled) radio_.update(now, encoder.queue.take_stats(), encoder.byte_rate);
+        if (drift_.enabled) radio_.update(now, encoder.queue.take_read_stats(), encoder.byte_rate);
         if (drift_.enabled && source_active_ && now - last_log >= 60) {   // quiet while idle
             last_log = now;
             LOGI("clock: phone %+.0f ppm%s, radio %+.0f ppm%s", pts_.ppm(),

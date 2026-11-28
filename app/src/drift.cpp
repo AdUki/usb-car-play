@@ -89,7 +89,7 @@ void RadioClock::update(double now, const ReadStats& s, double byte_rate) {
     if (win_start_ < 0) win_start_ = now;
     win_.gets += s.gets;
     win_.waits += s.waits;
-    win_.resets += s.resets;
+    win_.discontinuities += s.discontinuities;
     win_.backlog_sum += s.backlog_sum;
     win_.since_put_sum += s.since_put_sum;
     if (now - win_start_ < window_) return;
@@ -102,7 +102,7 @@ void RadioClock::end_window(double byte_rate) {
     // Only a window of steady reads says anything about the radio's clock. No reads (paused),
     // a read that waited (the radio is ahead of us) or a cut backlog: settle again afterwards,
     // around wherever the backlog is then.
-    if (win_.gets == 0 || win_.waits || win_.resets || byte_rate <= 0) {
+    if (win_.gets == 0 || win_.waits || win_.discontinuities || byte_rate <= 0) {
         settle_ = kSettleWindows;
         error_ = 0;
         return;
