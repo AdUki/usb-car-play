@@ -94,11 +94,23 @@ core). A radio whose buffer is bigger than the cushion (likely at 200 ms) waits 
 clock, so there the phone is held to the Pi's clock instead. Lost Bluetooth packets are filled to their
 length, so the timeline stays exact (except with aptX, whose packets carry no RTP header to tell).
 
-The code in [`app/src`](app/src) follows the data: `a2dp` (sink endpoints on BlueZ, decoded by
-`codecs`: libsbc, fdk-aac, libfreeaptx) →
-`stream` (live PCM/MP3 chunks, resampled by `drift`) → `livefile` (file offsets ↔ stream) →
-`player` (button logic, tags) → `fat` → `scsi` → `ffs` (USB via FunctionFS). `bluez` handles
-AVRCP, pairing and reconnects.
+The code in [`app/src`](app/src) is four boxes, and `main.cpp` wires them together:
+
+```
+            PCM             chunks                file bytes
+ Bluetooth ─────▶ LiveStream ─────▶ Player ◀───────────────▶ UsbDisk ◀──USB──▶ radio
+     ▲                 ▲ mute         │      reads, mount, unplug
+     └──── MediaControl: Next/Previous/Pause, track, delay
+```
+
+- **Bluetooth**: `bluez` (AVRCP, pairing, reconnects) and `a2dp` (the sink endpoints, decoded
+  by `codecs`: libsbc, fdk-aac, libfreeaptx). The Player sees it only as `MediaControl`.
+- **LiveStream** (`stream`): the phone's PCM corrected for clock drift (`drift`) and muted
+  around skips, encoded into WAV or MP3 chunks in a queue.
+- **Player** (`player`): the button logic and tags. `livefile` maps the file the radio plays
+  onto the live chunks.
+- **UsbDisk** (`usb_disk` → `scsi` → `fat`): FunctionFS and Bulk-Only, the SCSI commands, and
+  the FAT volume computed sector by sector. Each layer knows only the one below it.
 
 The stick boots straight into these programs, without systemd: `btdisk-init` mounts what is
 needed, sets up the USB gadget and starts btdisk, then D-Bus and bluetoothd, and restarts any
