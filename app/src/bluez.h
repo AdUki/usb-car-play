@@ -52,6 +52,8 @@ public:
 	bool wait_commands_done(double timeout_s) override;
 	std::string status() override;
 	bool connected() override;
+	bool audio_connected() override;
+	bool autoconnected() override;
 	void command(const std::string& cmd) override;
 	std::string phone_name() override;
 	/// to the A2DP sink, sent on the bus thread
@@ -118,6 +120,9 @@ private:
 	double p_started = 0;
 	/// with p_mu: a phone has connected since start, so no phone is called again
 	bool p_had_phone = false;
+	/// with p_mu: the device path of the phone connected right after power-on, while it stays
+	/// connected ("": none)
+	std::string p_autoconnected;
 	/// the bus thread: what update_visibility() set last
 	bool p_visible = false;
 	/// a Connect is out (it takes up to a page timeout)

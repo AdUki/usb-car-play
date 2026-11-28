@@ -514,6 +514,11 @@ void Bluez::on_props(const std::string& path, const std::string& iface, sd_bus_m
 				     d.connected ? "connected" : "disconnected");
 				d.connected_at = d.connected ? now_s() : 0;
 				d.had_audio = d.profile_tried = false;
+				// The first phone, while the stick calls them after power-on: autoplay is for it.
+				if (d.connected && !p_had_phone &&
+				    (p_connecting || now_s() - p_started < p_opt.autoconnect_s))
+					p_autoconnected = path;
+				if (!d.connected && path == p_autoconnected) p_autoconnected.clear();
 				if (d.connected) p_had_phone = true;
 			}
 
@@ -903,4 +908,20 @@ bool Bluez::connected()
 {
 	std::lock_guard<std::mutex> lk(p_mu);
 	return p_has_player;
+}
+
+bool Bluez::autoconnected()
+{
+	std::lock_guard<std::mutex> lk(p_mu);
+	const PlayerObj* p = active();
+	return p && !p_autoconnected.empty() && p->device == p_autoconnected;
+}
+
+bool Bluez::audio_connected()
+{
+	std::lock_guard<std::mutex> lk(p_mu);
+	const PlayerObj* p = active();
+	if (!p) return false;
+	auto t = p_transports.lower_bound(p->device + "/");
+	return t != p_transports.end() && t->compare(0, p->device.size() + 1, p->device + "/") == 0;
 }

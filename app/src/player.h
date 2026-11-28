@@ -40,6 +40,10 @@ public:
 	/// playing, paused, stopped, ...
 	virtual std::string status() = 0;
 	virtual bool connected() = 0;
+	/// connected, and its audio (A2DP) is up too: a Play before that plays on the phone itself
+	virtual bool audio_connected() { return connected(); }
+	/// the phone is the one the stick connected right after power-on, still on that connection
+	virtual bool autoconnected() { return true; }
 	/// next previous play pause
 	virtual void command(const std::string& cmd) = 0;
 	/// the connected (or last) phone
@@ -108,7 +112,7 @@ struct PlayerConfig
 	/// 0: don't pause the phone when the radio stops reading
 	double pause_after_s = 5.0;
 	/// Play when the radio reads and the phone is paused
-	bool autoplay = false;
+	bool autoplay = true;
 	/// what the tags say: "phone" (its name) or "track"
 	std::string tags = "phone";
 };
@@ -180,8 +184,6 @@ private:
 	std::map<int, TrackInfo> p_header_snap;
 	double p_last_data_read = 0, p_interval = 0;
 	bool p_paused_by_us = false, p_autoplay_done = false, p_settled = false;
-	/// at the last data read
-	bool p_phone_connected = false;
 	/// sequential reads near a file's end (see read_file)
 	int p_tail_file = -1;
 	/// the last data read before settling (see read_file)

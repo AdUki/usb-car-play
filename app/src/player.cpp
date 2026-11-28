@@ -109,7 +109,6 @@ void Player::on_mount()
 {
 	std::lock_guard<std::recursive_mutex> lk(p_mu);
 	p_guard_until = now_s() + p_cfg.guard_s;
-	p_autoplay_done = false;
 	p_settled = false;
 	event("mount");
 }
@@ -510,16 +509,15 @@ void Player::note_data_read(double now)
 	}
 	p_last_data_read = now;
 
-	// Autoplay once per mount, and again whenever the phone (re)connects while the radio
-	// reads: Android pauses when its Bluetooth link drops (power cut, out of range), and
-	// nothing else would start it again.
-	bool conn = p_control.connected();
-	if (conn && !p_phone_connected) p_autoplay_done = false;
-	p_phone_connected = conn;
+	// Autoplay once after power-on, for the phone the stick connected then (the car starting),
+	// not for one that the user connects later from the phone. Not before the phone's audio is
+	// up: a phone often connects its remote control seconds before A2DP, and a Play then is
+	// lost or plays on the phone's own speaker.
 	if (p_paused_by_us) {
 		p_paused_by_us = false;
 		command("play");
-	} else if (p_cfg.autoplay && !p_autoplay_done && conn) {
+	} else if (p_cfg.autoplay && !p_autoplay_done && p_control.audio_connected() &&
+	           p_control.autoconnected()) {
 		std::string s = p_control.status();
 		if (s.empty() || s == "unknown") return;  // the player has not said yet
 		p_autoplay_done = true;

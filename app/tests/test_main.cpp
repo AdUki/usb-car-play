@@ -43,6 +43,10 @@ struct FakePhone : MediaControl
 	uint64_t version = 1;
 	std::string state = "playing";
 	bool is_connected = true;
+	/// A2DP is up as well
+	bool has_audio = true;
+	/// connected by the stick at power-on
+	bool is_autoconnected = true;
 	double delay_s = 0;
 	std::vector<std::string> sent;
 
@@ -76,6 +80,8 @@ struct FakePhone : MediaControl
 		return state;
 	}
 	bool connected() override { return is_connected; }
+	bool audio_connected() override { return is_connected && has_audio; }
+	bool autoconnected() override { return is_autoconnected; }
 	void command(const std::string& c) override
 	{
 		{
@@ -707,8 +713,8 @@ static void test_player()
 		CHECK_EQ(r.phone.sent_str(), std::string("previous,previous,previous,previous,previous"));
 	}
 	{
-		// The phone's link drops while the radio plays (Android pauses then) and comes back:
-		// Play again, without the radio doing anything.
+		// Autoplay once after power-on: not again when the phone's link drops and comes back
+		// (the user disconnected it, or it was out of range), nor after a new mount.
 		PlayerRig r;
 		r.cfg.autoplay = true;
 		r.player = std::make_unique<Player>(r.cfg, r.stream, r.phone);
@@ -722,10 +728,33 @@ static void test_player()
 		CHECK_EQ(r.phone.sent_str(), std::string(""));
 		r.phone.is_connected = true;
 		r.play(0, 1);
-		CHECK_EQ(r.phone.sent_str(), std::string("play"));
-		r.phone.clear();
+		r.player->on_mount();
 		r.play(0, 1);
 		CHECK_EQ(r.phone.sent_str(), std::string(""));
+	}
+	{
+		// A phone the user connects from the phone, not the stick at power-on: no autoplay.
+		PlayerRig r;
+		r.cfg.autoplay = true;
+		r.player = std::make_unique<Player>(r.cfg, r.stream, r.phone);
+		r.phone.state = "paused";
+		r.phone.is_autoconnected = false;
+		r.play(0, 2);
+		CHECK_EQ(r.phone.sent_str(), std::string(""));
+	}
+	{
+		// The phone connects its remote control before its audio: Play waits for the audio, or
+		// the phone would drop it or play on its own speaker.
+		PlayerRig r;
+		r.cfg.autoplay = true;
+		r.player = std::make_unique<Player>(r.cfg, r.stream, r.phone);
+		r.phone.state = "paused";
+		r.phone.has_audio = false;
+		r.play(0, 2);
+		CHECK_EQ(r.phone.sent_str(), std::string(""));
+		r.phone.has_audio = true;
+		r.play(0, 1);
+		CHECK_EQ(r.phone.sent_str(), std::string("play"));
 	}
 	{
 		// Back from another source (no reads for a while), the radio opens its file again: the
