@@ -311,15 +311,15 @@ int mp3_frame_length(const uint8_t* h)
 
 std::vector<Bytes> Mp3FrameSplitter::feed(const uint8_t* data, size_t n)
 {
-	buf_.insert(buf_.end(), data, data + n);
+	p_buf.insert(p_buf.end(), data, data + n);
 	std::vector<Bytes> frames;
 	size_t pos = 0;
 	while (true) {
-		while (pos + 4 <= buf_.size() && !mp3_frame_length(&buf_[pos])) pos++;
-		if (pos + 4 > buf_.size()) break;
-		size_t len = mp3_frame_length(&buf_[pos]);
-		if (pos + len > buf_.size()) break;
-		Bytes f(buf_.begin() + pos, buf_.begin() + pos + len);
+		while (pos + 4 <= p_buf.size() && !mp3_frame_length(&p_buf[pos])) pos++;
+		if (pos + 4 > p_buf.size()) break;
+		size_t len = mp3_frame_length(&p_buf[pos]);
+		if (pos + len > p_buf.size()) break;
+		Bytes f(p_buf.begin() + pos, p_buf.begin() + pos + len);
 		pos += len;
 		size_t probe = std::min<size_t>(64, f.size());
 		auto has = [&](const char* tag) {
@@ -328,7 +328,7 @@ std::vector<Bytes> Mp3FrameSplitter::feed(const uint8_t* data, size_t n)
 		if (has("Xing") || has("Info")) continue;
 		frames.push_back(std::move(f));
 	}
-	buf_.erase(buf_.begin(), buf_.begin() + pos);
+	p_buf.erase(p_buf.begin(), p_buf.begin() + pos);
 	return frames;
 }
 

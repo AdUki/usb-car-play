@@ -35,8 +35,8 @@ private:
 	Status write(const uint8_t* cdb, const Bytes& data);
 	void rw_params(const uint8_t* cdb, uint64_t& lba, uint32_t& count) const;
 
-	FatVolume& vol_;
-	std::string vendor_, product_, serial_;
-	bool read_only_;
-	uint8_t sense_key_ = 0, asc_ = 0, ascq_ = 0;
+	FatVolume& p_vol;
+	std::string p_vendor, p_product, p_serial;
+	bool p_read_only;
+	uint8_t p_sense_key = 0, p_asc = 0, p_ascq = 0;
 };

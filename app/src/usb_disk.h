@@ -32,16 +32,16 @@ public:
 class BulkOnly
 {
 public:
-	BulkOnly(ScsiDisk& disk, BulkTransport& t) : disk_(disk), t_(t) {}
+	BulkOnly(ScsiDisk& disk, BulkTransport& t) : p_disk(disk), p_t(t) {}
 
 	/// Serves one CBW/data/CSW exchange.
 	/// @return false when the transport failed (host gone)
 	bool serve_one();
 
 private:
-	ScsiDisk& disk_;
-	BulkTransport& t_;
-	Bytes data_in_, data_out_;
+	ScsiDisk& p_disk;
+	BulkTransport& p_t;
+	Bytes p_data_in, p_data_out;
 };
 
 /// The usb.* settings of the gadget itself.
@@ -83,11 +83,11 @@ private:
 	void event(const uint8_t* ev);
 	void setup(uint8_t type, uint8_t req, uint16_t length);
 
-	UsbDiskOptions opt_;
-	ScsiDisk disk_;
-	int ep0_ = -1, ep_in_ = -1, ep_out_ = -1;
-	std::mutex mu_;
-	std::condition_variable cv_;
-	bool enabled_ = false;
-	std::thread bot_;
+	UsbDiskOptions p_opt;
+	ScsiDisk p_disk;
+	int p_ep0 = -1, p_ep_in = -1, p_ep_out = -1;
+	std::mutex p_mu;
+	std::condition_variable p_cv;
+	bool p_enabled = false;
+	std::thread p_bot;
 };

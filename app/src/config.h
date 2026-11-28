@@ -19,7 +19,7 @@ public:
 	/// Adds the file's settings.
 	/// @return false only when it can't be read
 	bool load(const std::string& path);
-	void set(const std::string& key, const std::string& value) { values_[key] = {value, "set"}; }
+	void set(const std::string& key, const std::string& value) { p_values[key] = {value, "set"}; }
 
 	std::string str(const std::string& key, const std::string& def) const;
 	long num(const std::string& key, long def) const;
@@ -29,11 +29,11 @@ public:
 	void reject(const std::string& key, const std::string& why) const;
 
 	/// What to log once the log is set up (the files load before it is).
-	const std::vector<std::string>& warnings() const { return warnings_; }
+	const std::vector<std::string>& warnings() const { return p_warnings; }
 
 	/// The keys a later file set to something else than an earlier one ("audio.format = wav
 	/// (was mp3)"), in the order they were met.
-	const std::vector<std::string>& changes() const { return changes_; }
+	const std::vector<std::string>& changes() const { return p_changes; }
 	/// Keys set in a file that nothing asked for: a typo, or a setting that no longer exists.
 	std::vector<std::string> unknown_keys() const;
 
@@ -48,8 +48,8 @@ private:
 	void warn(const Value& v, const std::string& key, const std::string& what) const;
 
 	/// "section.key" -> value
-	std::map<std::string, Value> values_;
-	mutable std::set<std::string> asked_;
-	mutable std::vector<std::string> warnings_;
-	std::vector<std::string> changes_;
+	std::map<std::string, Value> p_values;
+	mutable std::set<std::string> p_asked;
+	mutable std::vector<std::string> p_warnings;
+	std::vector<std::string> p_changes;
 };

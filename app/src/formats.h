@@ -58,7 +58,7 @@ public:
 	std::vector<Bytes> feed(const uint8_t* data, size_t n);
 
 private:
-	Bytes buf_;
+	Bytes p_buf;
 };
 
 Bytes silent_mp3_frame(int kbps, int rate, bool stereo);

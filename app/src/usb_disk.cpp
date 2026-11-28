@@ -16,11 +16,11 @@
 bool BulkOnly::serve_one()
 {
 	uint8_t cbw[512];
-	ssize_t n = t_.read_out(cbw, sizeof cbw);
+	ssize_t n = p_t.read_out(cbw, sizeof cbw);
 	if (n < 0) return false;
 	if (n != 31 || get_le32(cbw) != 0x43425355 || cbw[14] < 1 || cbw[14] > 16) {
 		LOGW("invalid CBW (%zd bytes)", n);
-		t_.halt();
+		p_t.halt();
 		return true;
 	}
 	uint32_t tag = get_le32(cbw + 4), length = get_le32(cbw + 8);
@@ -28,35 +28,35 @@ bool BulkOnly::serve_one()
 	uint8_t lun = cbw[13];
 	const uint8_t* cdb = cbw + 15;
 
-	data_out_.clear();
+	p_data_out.clear();
 	if (length && !dir_in) {
-		data_out_.resize(length);
+		p_data_out.resize(length);
 		size_t got = 0;
 		while (got < length) {
-			ssize_t r = t_.read_out(data_out_.data() + got, length - got);
+			ssize_t r = p_t.read_out(p_data_out.data() + got, length - got);
 			if (r <= 0) return false;
 			got += r;
 		}
 	}
 	ScsiDisk::Status st =
-	    lun == 0 ? disk_.execute(cdb, data_out_, data_in_) : ScsiDisk::kCheckCondition;
-	if (lun != 0) data_in_.clear();
+	    lun == 0 ? p_disk.execute(cdb, p_data_out, p_data_in) : ScsiDisk::kCheckCondition;
+	if (lun != 0) p_data_in.clear();
 	uint32_t residue = 0;
 	if (dir_in && length) {
 		// Short replies are padded rather than stalled (BOT 6.7.2 allows either for Hi > Di;
 		// some hosts handle the stall badly).
-		if (data_in_.size() < length) {
-			residue = length - data_in_.size();
-			data_in_.resize(length, 0);
+		if (p_data_in.size() < length) {
+			residue = length - p_data_in.size();
+			p_data_in.resize(length, 0);
 		}
-		if (!t_.write_in(data_in_.data(), length)) return false;
+		if (!p_t.write_in(p_data_in.data(), length)) return false;
 	}
 	uint8_t csw[13];
 	put_le32(csw, 0x53425355);
 	put_le32(csw + 4, tag);
 	put_le32(csw + 8, residue);
 	csw[12] = st == ScsiDisk::kGood ? 0 : 1;
-	return t_.write_in(csw, sizeof csw);
+	return p_t.write_in(csw, sizeof csw);
 }
 
 // ------------------------------------------------------------------------- FunctionFS
@@ -206,50 +206,50 @@ void bind_udc(const std::string& gadget, std::string udc)
 }  // namespace
 
 UsbDisk::UsbDisk(FatVolume& vol, UsbDiskOptions opt)
-    : opt_(std::move(opt)),
-      disk_(vol, opt_.vendor, opt_.product, opt_.serial == "auto" ? board_serial() : opt_.serial,
-            opt_.read_only)
+    : p_opt(std::move(opt)),
+      p_disk(vol, p_opt.vendor, p_opt.product,
+             p_opt.serial == "auto" ? board_serial() : p_opt.serial, p_opt.read_only)
 {
-	disk_.on_mount = [this] {
+	p_disk.on_mount = [this] {
 		if (on_mount) on_mount();
 	};
 }
 
 UsbDisk::~UsbDisk()
 {
-	if (bot_.joinable()) bot_.detach();
-	for (int fd : {ep_in_, ep_out_, ep0_})
+	if (p_bot.joinable()) p_bot.detach();
+	for (int fd : {p_ep_in, p_ep_out, p_ep0})
 		if (fd >= 0) close(fd);
 }
 
 void UsbDisk::start()
 {
-	ep0_ = open((opt_.ffs + "/ep0").c_str(), O_RDWR);
-	if (ep0_ < 0) throw std::runtime_error("open " + opt_.ffs + "/ep0: " + strerror(errno));
+	p_ep0 = open((p_opt.ffs + "/ep0").c_str(), O_RDWR);
+	if (p_ep0 < 0) throw std::runtime_error("open " + p_opt.ffs + "/ep0: " + strerror(errno));
 	Descriptors d = make_descriptors();
 	Strings s = make_strings();
-	if (::write(ep0_, &d, sizeof d) != ssize_t(sizeof d))
+	if (::write(p_ep0, &d, sizeof d) != ssize_t(sizeof d))
 		throw std::runtime_error(std::string("writing descriptors: ") + strerror(errno));
-	if (::write(ep0_, &s, sizeof s) != ssize_t(sizeof s))
+	if (::write(p_ep0, &s, sizeof s) != ssize_t(sizeof s))
 		throw std::runtime_error(std::string("writing strings: ") + strerror(errno));
 	// Endpoint files are numbered in descriptor order: ep1 is bulk IN, ep2 bulk OUT.
-	ep_in_ = open((opt_.ffs + "/ep1").c_str(), O_RDWR);
-	ep_out_ = open((opt_.ffs + "/ep2").c_str(), O_RDWR);
-	if (ep_in_ < 0 || ep_out_ < 0) throw std::runtime_error("opening the bulk endpoints");
-	bot_ = std::thread([this] { bot_loop(); });
-	LOGI("FunctionFS ready at %s", opt_.ffs.c_str());
+	p_ep_in = open((p_opt.ffs + "/ep1").c_str(), O_RDWR);
+	p_ep_out = open((p_opt.ffs + "/ep2").c_str(), O_RDWR);
+	if (p_ep_in < 0 || p_ep_out < 0) throw std::runtime_error("opening the bulk endpoints");
+	p_bot = std::thread([this] { bot_loop(); });
+	LOGI("FunctionFS ready at %s", p_opt.ffs.c_str());
 	// The descriptors are in: attach to the bus. The host sees the stick from here on.
-	if (!opt_.gadget.empty()) bind_udc(opt_.gadget, opt_.udc);
+	if (!p_opt.gadget.empty()) bind_udc(p_opt.gadget, p_opt.udc);
 }
 
 void UsbDisk::bot_loop()
 {
-	EpTransport t(ep_in_, ep_out_);
-	BulkOnly bot(disk_, t);
+	EpTransport t(p_ep_in, p_ep_out);
+	BulkOnly bot(p_disk, t);
 	for (;;) {
 		{
-			std::unique_lock<std::mutex> lk(mu_);
-			cv_.wait(lk, [&] { return enabled_; });
+			std::unique_lock<std::mutex> lk(p_mu);
+			p_cv.wait(lk, [&] { return p_enabled; });
 		}
 		if (!bot.serve_one()) {
 			// ESHUTDOWN or ECONNRESET: the host went away or reset us; wait for the next enable.
@@ -263,7 +263,7 @@ void UsbDisk::run()
 {
 	uint8_t buf[sizeof(usb_functionfs_event) * 4];
 	for (;;) {
-		ssize_t n = ::read(ep0_, buf, sizeof buf);
+		ssize_t n = ::read(p_ep0, buf, sizeof buf);
 		if (n < 0) {
 			if (errno == EINTR) continue;
 			LOGW("ep0: %s", strerror(errno));
@@ -286,10 +286,10 @@ void UsbDisk::event(const uint8_t* raw)
 	switch (ev.type) {
 	case FUNCTIONFS_ENABLE: {
 		{
-			std::lock_guard<std::mutex> lk(mu_);
-			enabled_ = true;
+			std::lock_guard<std::mutex> lk(p_mu);
+			p_enabled = true;
 		}
-		cv_.notify_all();
+		p_cv.notify_all();
 		break;
 	}
 	case FUNCTIONFS_DISABLE:
@@ -297,9 +297,9 @@ void UsbDisk::event(const uint8_t* raw)
 	case FUNCTIONFS_SUSPEND: {
 		bool was;
 		{
-			std::lock_guard<std::mutex> lk(mu_);
-			was = enabled_;
-			if (ev.type != FUNCTIONFS_SUSPEND) enabled_ = false;
+			std::lock_guard<std::mutex> lk(p_mu);
+			was = p_enabled;
+			if (ev.type != FUNCTIONFS_SUSPEND) p_enabled = false;
 		}
 		if (was && on_disconnect) on_disconnect();
 		break;
@@ -316,14 +316,14 @@ void UsbDisk::setup(uint8_t type, uint8_t req, uint16_t length)
 	uint8_t zero = 0;
 	ssize_t r;
 	if (type == 0xA1 && req == 0xFE) {  // GET MAX LUN: one LUN
-		r = ::write(ep0_, &zero, length ? 1 : 0);
+		r = ::write(p_ep0, &zero, length ? 1 : 0);
 	} else if (type == 0x21 && req == 0xFF) {  // Bulk-Only Mass Storage Reset
 		LOGI("usb: bulk-only reset");
-		r = ::read(ep0_, nullptr, 0);
+		r = ::read(p_ep0, nullptr, 0);
 	} else if (type & USB_DIR_IN) {
-		r = ::read(ep0_, &zero, 0);  // wrong direction: stall
+		r = ::read(p_ep0, &zero, 0);  // wrong direction: stall
 	} else {
-		r = ::write(ep0_, &zero, 0);  // wrong direction: stall
+		r = ::write(p_ep0, &zero, 0);  // wrong direction: stall
 	}
 	(void)r;
 }

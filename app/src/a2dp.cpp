@@ -86,13 +86,13 @@ struct A2dpSink::Bus
 
 A2dpSink::A2dpSink(LiveStream& stream, bool apply_volume, int rt_priority, int delay_ms,
                    std::vector<const CodecInfo*> codecs)
-    : stream_(stream), apply_volume_(apply_volume), rt_prio_(rt_priority),
-      delay_(uint16_t(std::clamp(delay_ms, 0, 6553) * 10))
+    : p_stream(stream), p_apply_volume(apply_volume), p_rt_prio(rt_priority),
+      p_delay(uint16_t(std::clamp(delay_ms, 0, 6553) * 10))
 {
 	if (codecs.empty())
 		for (auto& c : available_codecs()) codecs.push_back(&c);
 	for (const CodecInfo* c : codecs)
-		endpoints_.push_back(
+		p_endpoints.push_back(
 		    std::make_unique<Endpoint>(Endpoint{this, c, kEndpointDir + std::string(c->name)}));
 }
 
@@ -105,8 +105,8 @@ void A2dpSink::register_endpoint(sd_bus* bus, const std::string& adapter)
 {
 	// In order of preference: bluetoothd tries them in this order when it opens the stream.
 	std::string names;
-	for (auto& ep : endpoints_) {
-		if (!registered_)
+	for (auto& ep : p_endpoints) {
+		if (!p_registered)
 			sd_bus_add_object_vtable(bus, nullptr, ep->path.c_str(), "org.bluez.MediaEndpoint1",
 			                         Bus::endpoint_vtable, ep.get());
 		sd_bus_message *m = nullptr, *reply = nullptr;
@@ -117,7 +117,7 @@ void A2dpSink::register_endpoint(sd_bus* bus, const std::string& adapter)
 		sd_bus_message_open_container(m, 'a', "{sv}");
 		sd_bus_message_append(m, "{sv}", "UUID", "s", kA2dpSinkUuid);
 		sd_bus_message_append(m, "{sv}", "Codec", "y", ep->codec->a2dp_codec);
-		if (delay_) sd_bus_message_append(m, "{sv}", "DelayReporting", "b", 1);
+		if (p_delay) sd_bus_message_append(m, "{sv}", "DelayReporting", "b", 1);
 		sd_bus_message_open_container(m, 'e', "sv");
 		sd_bus_message_append(m, "s", "Capabilities");
 		sd_bus_message_open_container(m, 'v', "ay");
@@ -135,7 +135,7 @@ void A2dpSink::register_endpoint(sd_bus* bus, const std::string& adapter)
 		sd_bus_message_unref(m);
 		sd_bus_message_unref(reply);
 	}
-	registered_ = true;
+	p_registered = true;
 	if (!names.empty())
 		LOGI("a2dp: sink endpoints registered on %s: %s", adapter.c_str(), names.c_str());
 }
@@ -189,15 +189,15 @@ int A2dpSink::set_configuration(const CodecInfo& c, sd_bus_message* m)
 		sd_bus_message_exit_container(m);
 	}
 	LOGI("a2dp: %s configured: %s", path ? path : "?", describe_config(c.id, t.config).c_str());
-	if (t.volume >= 0) volume_ = t.volume;
+	if (t.volume >= 0) p_volume = t.volume;
 	{
-		std::lock_guard<std::mutex> lk(mu_);
-		if (path) transports_[path] = t;
+		std::lock_guard<std::mutex> lk(p_mu);
+		if (path) p_transports[path] = t;
 	}
 
 	// Before the reply: bluetoothd takes the delay first, and sends it as the initial delay
 	// report when the stream it is configuring reaches CONFIGURED.
-	if (path) report_delay(sd_bus_message_get_bus(m), path, delay_);
+	if (path) report_delay(sd_bus_message_get_bus(m), path, p_delay);
 	return sd_bus_reply_method_return(m, "");
 }
 
@@ -216,34 +216,35 @@ void A2dpSink::report_delay(sd_bus* bus, const std::string& path, uint16_t delay
 
 void A2dpSink::set_delay(double ms)
 {
-	want_delay_ = int(std::clamp(ms, 0.1, 6553.5) * 10 + 0.5);
+	p_want_delay = int(std::clamp(ms, 0.1, 6553.5) * 10 + 0.5);
 }
 
 void A2dpSink::apply_delay(sd_bus* bus)
 {
-	int want = want_delay_.exchange(-1);
-	if (want < 0 || !delay_ || uint16_t(want) == delay_) return;
-	delay_ = uint16_t(want);
+	int want = p_want_delay.exchange(-1);
+	if (want < 0 || !p_delay || uint16_t(want) == p_delay) return;
+	p_delay = uint16_t(want);
 	std::vector<std::string> paths;
 	{
-		std::lock_guard<std::mutex> lk(mu_);
-		for (auto& [path, t] : transports_) {
+		std::lock_guard<std::mutex> lk(p_mu);
+		for (auto& [path, t] : p_transports) {
 			t.delay_sent = false;  // logs the new value once taken; acquired() retries
 			paths.push_back(path);
 		}
 	}
-	LOGI("a2dp: delay now %.1f ms%s", delay_ / 10.0, paths.empty() ? " (for the next stream)" : "");
-	for (auto& p : paths) report_delay(bus, p, delay_);
+	LOGI("a2dp: delay now %.1f ms%s", p_delay / 10.0,
+	     paths.empty() ? " (for the next stream)" : "");
+	for (auto& p : paths) report_delay(bus, p, p_delay);
 }
 
 void A2dpSink::delay_reported(const std::string& path, const char* error)
 {
-	std::lock_guard<std::mutex> lk(mu_);
-	auto it = transports_.find(path);
-	if (it == transports_.end()) return;
+	std::lock_guard<std::mutex> lk(p_mu);
+	auto it = p_transports.find(path);
+	if (it == p_transports.end()) return;
 	if (!error) {
 		if (!it->second.delay_sent)
-			LOGI("a2dp: delay %.1f ms reported to the phone", delay_ / 10.0);
+			LOGI("a2dp: delay %.1f ms reported to the phone", p_delay / 10.0);
 		it->second.delay_sent = true;
 	} else {
 		// Before CONFIGURED an unpatched bluetoothd refuses (< 5.79 has no setter, newer ones
@@ -265,8 +266,8 @@ void A2dpSink::on_transport_props(sd_bus* bus, const std::string& path, sd_bus_m
 	std::string state;
 	bool ours;
 	{
-		std::lock_guard<std::mutex> lk(mu_);
-		ours = transports_.count(path);
+		std::lock_guard<std::mutex> lk(p_mu);
+		ours = p_transports.count(path);
 	}
 	if (sd_bus_message_enter_container(m, 'a', "{sv}") <= 0) return;
 	while (sd_bus_message_enter_container(m, 'e', "sv") > 0) {
@@ -287,7 +288,7 @@ void A2dpSink::on_transport_props(sd_bus* bus, const std::string& path, sd_bus_m
 			sd_bus_message_read_basic(m, 'q', &v);
 			sd_bus_message_exit_container(m);
 			if (ours) {
-				volume_ = v;
+				p_volume = v;
 				LOGI("a2dp: volume %u/127", v);
 			}
 		} else {
@@ -298,8 +299,8 @@ void A2dpSink::on_transport_props(sd_bus* bus, const std::string& path, sd_bus_m
 	sd_bus_message_exit_container(m);
 	if (!ours || state.empty()) return;
 	{
-		std::lock_guard<std::mutex> lk(mu_);
-		transports_[path].state = state;
+		std::lock_guard<std::mutex> lk(p_mu);
+		p_transports[path].state = state;
 	}
 	LOGD("a2dp: %s %s", path.c_str(), state.c_str());
 	// The phone started the stream: a sink must acquire the transport to receive it.
@@ -324,9 +325,9 @@ void A2dpSink::acquired(sd_bus* bus, const std::string& path, int fd, uint16_t r
 	Codec codec;
 	bool delay_sent = true;
 	{
-		std::lock_guard<std::mutex> lk(mu_);
-		auto it = transports_.find(path);
-		if (it == transports_.end() || fd < 0) {
+		std::lock_guard<std::mutex> lk(p_mu);
+		auto it = p_transports.find(path);
+		if (it == p_transports.end() || fd < 0) {
 			if (fd >= 0) close(fd);
 			return;
 		}
@@ -340,45 +341,45 @@ void A2dpSink::acquired(sd_bus* bus, const std::string& path, int fd, uint16_t r
 	// The initial report didn't take: report again now that the stream runs. 0.1 ms more,
 	// because bluetoothd >= 5.79 keeps the value of a Set that failed and then takes the same
 	// value again as nothing to send.
-	if (bus && !delay_sent) report_delay(bus, path, uint16_t(delay_ + 1));
-	stop_ = false;
-	reading_path_ = path;
-	reader_ =
+	if (bus && !delay_sent) report_delay(bus, path, uint16_t(p_delay + 1));
+	p_stop = false;
+	p_reading_path = path;
+	p_reader =
 	    std::thread([this, fd, read_mtu, codec, config] { reader(fd, read_mtu, codec, config); });
 }
 
 void A2dpSink::on_transport_removed(const std::string& path)
 {
 	{
-		std::lock_guard<std::mutex> lk(mu_);
-		transports_.erase(path);
+		std::lock_guard<std::mutex> lk(p_mu);
+		p_transports.erase(path);
 	}
-	if (path == reading_path_) stop_reader();
+	if (path == p_reading_path) stop_reader();
 }
 
 void A2dpSink::reset()
 {
 	{
-		std::lock_guard<std::mutex> lk(mu_);
-		transports_.clear();
+		std::lock_guard<std::mutex> lk(p_mu);
+		p_transports.clear();
 	}
 	stop_reader();
 }
 
 void A2dpSink::stop_reader()
 {
-	stop_ = true;
-	if (reader_.joinable()) reader_.join();
-	reading_path_.clear();
+	p_stop = true;
+	if (p_reader.joinable()) p_reader.join();
+	p_reading_path.clear();
 }
 
 void A2dpSink::reader(int fd, uint16_t mtu, Codec codec, Bytes config)
 {
-	if (rt_prio_ > 0) {
+	if (p_rt_prio > 0) {
 		// On one ARM11 core a late wakeup means the L2CAP socket backs up and the phone drops
 		// packets.
 		sched_param sp{};
-		sp.sched_priority = rt_prio_;
+		sp.sched_priority = p_rt_prio;
 		pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
 	}
 	std::unique_ptr<Decoder> dec = Decoder::create(codec, config);
@@ -391,8 +392,8 @@ void A2dpSink::reader(int fd, uint16_t mtu, Codec codec, Bytes config)
 	std::vector<uint8_t> pkt(std::max<int>(mtu, 1024));
 	std::vector<int16_t> pcm, gap, previous;
 	pcm.reserve(8192);
-	streaming_ = true;
-	stream_.phone_reset();
+	p_streaming = true;
+	p_stream.phone_reset();
 
 	// The phone's timeline, in its samples: where the next packet's first sample belongs.
 	// Packets lost on the air are filled to their length with the last packet's audio again,
@@ -405,8 +406,8 @@ void A2dpSink::reader(int fd, uint16_t mtu, Codec codec, Bytes config)
 	bool have_last = false, have_seq = false;
 	uint16_t last_seq = 0;
 	uint64_t lost = 0;
-	lost_ = 0;
-	while (!stop_) {
+	p_lost = 0;
+	while (!p_stop) {
 		pollfd p{fd, POLLIN, 0};
 		int r = poll(&p, 1, 500);
 		if (r < 0 && errno != EINTR) break;
@@ -431,7 +432,7 @@ void A2dpSink::reader(int fd, uint16_t mtu, Codec codec, Bytes config)
 			ts = get_be32(&pkt[4]);
 			missing = have_seq ? uint16_t(seq - last_seq - 1) : 0;
 			if (missing > 1000) missing = 0;  // reordered or restarted: not a loss
-			lost_ = lost += missing;
+			p_lost = lost += missing;
 			last_seq = seq;
 			have_seq = true;
 			if (off >= size_t(n)) continue;
@@ -451,7 +452,7 @@ void A2dpSink::reader(int fd, uint16_t mtu, Codec codec, Bytes config)
 				if (ts_step > 0 && ts_step < 44100)
 					fill = uint64_t(ts_step);
 				else if (ts_step != 0)
-					stream_.phone_reset();  // a jump: a new timeline
+					p_stream.phone_reset();  // a jump: a new timeline
 			} else {
 				fill = uint64_t(missing) * last_frames;
 			}
@@ -462,26 +463,26 @@ void A2dpSink::reader(int fd, uint16_t mtu, Codec codec, Bytes config)
 				size_t fade = std::min(gap.size(), previous.size());
 				for (size_t i = 0; i < fade; i++)
 					gap[i] = int16_t(previous[i] * int32_t(fade - i) / int32_t(fade));
-				stream_.write_pcm(reinterpret_cast<uint8_t*>(gap.data()), gap.size() * 2);
+				p_stream.write_pcm(reinterpret_cast<uint8_t*>(gap.data()), gap.size() * 2);
 				position += fill;
 			}
 		}
 		have_last = true;
 		last_ts = ts;
 		last_frames = pkt_frames;
-		int vol = volume_;
-		if (apply_volume_ && vol < 127) {
+		int vol = p_volume;
+		if (p_apply_volume && vol < 127) {
 			// AVRCP absolute volume: the phone expects the sink to apply it. A square law is
 			// closer to how loud the phone's slider feels than a linear one.
 			int gain = vol * vol * 32768 / (127 * 127);
 			for (size_t i = 0; i < samples; i++) s[i] = int16_t(int32_t(s[i]) * gain >> 15);
 		}
-		stream_.phone_timing(position, arrival);
-		stream_.write_pcm(reinterpret_cast<uint8_t*>(s), samples * 2);
+		p_stream.phone_timing(position, arrival);
+		p_stream.write_pcm(reinterpret_cast<uint8_t*>(s), samples * 2);
 		previous.assign(s, s + samples);
 		position += pkt_frames;
 	}
-	streaming_ = false;
+	p_streaming = false;
 	close(fd);
 	LOGI("a2dp: stream ended (%llu packets lost)", (unsigned long long)lost);
 }

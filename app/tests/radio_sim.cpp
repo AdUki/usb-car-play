@@ -99,18 +99,18 @@ public:
 	// `start` bytes and runs `clock_ppm` off the wall clock.
 	Radio(FatReader& fs, std::vector<FoundFile> files, size_t chunk = 32768, size_t buffer = 196608,
 	      size_t start = 65536, double clock_ppm = 0)
-	    : fs_(fs), files_(std::move(files)), chunk_(chunk), buffer_(buffer), start_(start),
-	      rate_(44100 * (1 + clock_ppm * 1e-6))
+	    : p_fs(fs), p_files(std::move(files)), p_chunk(chunk), p_buffer(buffer), p_start(start),
+	      p_rate(44100 * (1 + clock_ppm * 1e-6))
 	{}
 
 	// Opens file i and plays it for `seconds` of wall time. sony: the way the car's Sony opens a
 	// file (its log): the header, 2 s nothing, 2 KiB of audio, a second nothing, then on.
 	Segment play(int i, double seconds, std::string& header_text, bool sony = false)
 	{
-		const FoundFile& f = files_[i];
-		Bytes hdr = fs_.read_file(f, 0, 4096);
+		const FoundFile& f = p_files[i];
+		Bytes hdr = p_fs.read_file(f, 0, 4096);
 		header_text.assign(hdr.begin(), hdr.end());
-		fs_.read_file(f, f.size - 128, 128);  // the tail, like a radio looking for an ID3v1 tag
+		p_fs.read_file(f, f.size - 128, 128);  // the tail, like a radio looking for an ID3v1 tag
 		uint32_t data_off = 44;
 		for (uint32_t p = 12; p + 8 <= hdr.size();) {
 			uint32_t len = get_le32(&hdr[p + 4]);
@@ -125,7 +125,7 @@ public:
 		uint32_t pos = data_off;
 		if (sony) {
 			usleep(2000000);
-			buffer = fs_.read_file(f, pos, 2048);
+			buffer = p_fs.read_file(f, pos, 2048);
 			pos += 2048;
 			usleep(900000);
 		}
@@ -133,8 +133,8 @@ public:
 		double t_start = now_s(), t_last = 0;
 		double played_frames = 0;
 		while (now_s() - t_start < seconds) {
-			if (buffer.size() + chunk_ <= buffer_) {
-				Bytes b = fs_.read_file(f, pos, uint32_t(chunk_));
+			if (buffer.size() + p_chunk <= p_buffer) {
+				Bytes b = p_fs.read_file(f, pos, uint32_t(p_chunk));
 				pos += b.size();
 				buffer.insert(buffer.end(), b.begin(), b.end());
 			} else {
@@ -142,14 +142,14 @@ public:
 			}
 			double now = now_s();
 			if (!playing) {
-				if (buffer.size() >= start_) {
+				if (buffer.size() >= p_start) {
 					playing = true;
 					t_last = now;
 					seg.first_play = now;
 				}
 				continue;
 			}
-			played_frames += (now - t_last) * rate_;
+			played_frames += (now - t_last) * p_rate;
 			t_last = now;
 			size_t frames = size_t(played_frames);
 			played_frames -= frames;
@@ -169,10 +169,10 @@ public:
 	double underrun_s = 0;
 
 private:
-	FatReader& fs_;
-	std::vector<FoundFile> files_;
-	size_t chunk_, buffer_, start_;
-	double rate_;
+	FatReader& p_fs;
+	std::vector<FoundFile> p_files;
+	size_t p_chunk, p_buffer, p_start;
+	double p_rate;
 };
 
 double frequency(const std::vector<int16_t>& x, size_t from, size_t n)

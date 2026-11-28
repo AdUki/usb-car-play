@@ -36,7 +36,7 @@ bool Config::load(const std::string& path)
 		if (line[0] == '[') {
 			size_t end = line.find(']');
 			if (end == std::string::npos) {
-				warnings_.push_back(where + ": no ] after the section name, line ignored");
+				p_warnings.push_back(where + ": no ] after the section name, line ignored");
 				continue;
 			}
 			section = trim(line.substr(1, end - 1));
@@ -44,35 +44,35 @@ bool Config::load(const std::string& path)
 		}
 		size_t eq = line.find('=');
 		if (eq == std::string::npos) {
-			warnings_.push_back(where + ": not key = value, line ignored: " + line);
+			p_warnings.push_back(where + ": not key = value, line ignored: " + line);
 			continue;
 		}
 		std::string key = trim(line.substr(0, eq)), value = trim(line.substr(eq + 1));
 		if (key.empty()) {
-			warnings_.push_back(where + ": no key before =, line ignored");
+			p_warnings.push_back(where + ": no key before =, line ignored");
 			continue;
 		}
 		if (value.size() >= 2 && value.front() == '"' && value.back() == '"')
 			value = value.substr(1, value.size() - 2);
 		if (!section.empty()) key = section + "." + key;
-		auto it = values_.find(key);
-		if (it != values_.end() && it->second.value != value)
-			changes_.push_back(key + " = " + value + " (was " + it->second.value + ")");
-		values_[key] = {value, where};
+		auto it = p_values.find(key);
+		if (it != p_values.end() && it->second.value != value)
+			p_changes.push_back(key + " = " + value + " (was " + it->second.value + ")");
+		p_values[key] = {value, where};
 	}
 	return true;
 }
 
 const Config::Value* Config::find(const std::string& key) const
 {
-	asked_.insert(key);
-	auto it = values_.find(key);
-	return it == values_.end() ? nullptr : &it->second;
+	p_asked.insert(key);
+	auto it = p_values.find(key);
+	return it == p_values.end() ? nullptr : &it->second;
 }
 
 void Config::warn(const Value& v, const std::string& key, const std::string& what) const
 {
-	warnings_.push_back(v.where + ": " + key + " = " + v.value + ": " + what);
+	p_warnings.push_back(v.where + ": " + key + " = " + v.value + ": " + what);
 }
 
 void Config::reject(const std::string& key, const std::string& why) const
@@ -130,7 +130,7 @@ bool Config::flag(const std::string& key, bool def) const
 std::vector<std::string> Config::unknown_keys() const
 {
 	std::vector<std::string> out;
-	for (auto& [key, v] : values_)
-		if (!asked_.count(key)) out.push_back(key + " (" + v.where + ")");
+	for (auto& [key, v] : p_values)
+		if (!p_asked.count(key)) out.push_back(key + " (" + v.where + ")");
 	return out;
 }

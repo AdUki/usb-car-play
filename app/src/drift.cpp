@@ -6,34 +6,34 @@
 // ------------------------------------------------------------------------------ PtsClock
 
 PtsClock::PtsClock(double rate, double window_s, double span_s)
-    : rate_(rate), window_(window_s), span_(span_s)
+    : p_rate(rate), p_window(window_s), p_span(span_s)
 {}
 
 void PtsClock::reset()
 {
-	mins_.clear();
-	in_window_ = false;
+	p_mins.clear();
+	p_in_window = false;
 }
 
 void PtsClock::update(uint64_t position, double arrival)
 {
-	double d = arrival - double(position) / rate_;
-	if (!in_window_) {
-		if (mins_.empty()) t0_ = arrival;
-		in_window_ = true;
-		win_start_ = win_t_ = arrival;
-		win_min_ = d;
+	double d = arrival - double(position) / p_rate;
+	if (!p_in_window) {
+		if (p_mins.empty()) p_t0 = arrival;
+		p_in_window = true;
+		p_win_start = p_win_t = arrival;
+		p_win_min = d;
 		return;
 	}
-	if (d < win_min_) {
-		win_min_ = d;
-		win_t_ = arrival;
+	if (d < p_win_min) {
+		p_win_min = d;
+		p_win_t = arrival;
 	}
-	if (arrival - win_start_ < window_) return;
-	mins_.emplace_back(win_t_ - t0_, win_min_);
-	while (mins_.back().first - mins_.front().first > span_) mins_.pop_front();
-	win_start_ = win_t_ = arrival;
-	win_min_ = d;
+	if (arrival - p_win_start < p_window) return;
+	p_mins.emplace_back(p_win_t - p_t0, p_win_min);
+	while (p_mins.back().first - p_mins.front().first > p_span) p_mins.pop_front();
+	p_win_start = p_win_t = arrival;
+	p_win_min = d;
 	fit();
 }
 
@@ -47,7 +47,7 @@ void PtsClock::fit()
 		auto keep = [&](const std::pair<double, double>& p) {
 			return pass == 0 || std::fabs(p.second - (a + slope * p.first)) <= 3 * sigma;
 		};
-		for (auto& p : mins_)
+		for (auto& p : p_mins)
 			if (keep(p)) {
 				n++;
 				st += p.first;
@@ -55,14 +55,14 @@ void PtsClock::fit()
 			}
 		if (n < 6) return;
 		double mt = st / n, md = sd / n, sxx = 0, sxy = 0;
-		for (auto& p : mins_)
+		for (auto& p : p_mins)
 			if (keep(p)) {
 				sxx += (p.first - mt) * (p.first - mt);
 				sxy += (p.first - mt) * (p.second - md);
 			}
 		if (sxx <= 0) return;
 		double b = sxy / sxx, ia = md - b * mt, rss = 0;
-		for (auto& p : mins_)
+		for (auto& p : p_mins)
 			if (keep(p)) rss += std::pow(p.second - (ia + b * p.first), 2);
 		sigma = std::sqrt(rss / (n - 2)) + 1e-6;
 		se = sigma / std::sqrt(sxx);
@@ -71,10 +71,10 @@ void PtsClock::fit()
 	}
 	// The phone's samples arrive ever earlier when its clock is fast: the delay falls.
 	double ppm = -slope * 1e6;
-	error_ppm_ = se * 1e6;
-	if (error_ppm_ < 20 && std::fabs(ppm) < 2000) {
-		ppm_ = ppm;
-		valid_ = true;
+	p_error_ppm = se * 1e6;
+	if (p_error_ppm < 20 && std::fabs(ppm) < 2000) {
+		p_ppm = ppm;
+		p_valid = true;
 	}
 }
 
@@ -85,27 +85,27 @@ constexpr int kSettleWindows = 2;
 }
 
 RadioClock::RadioClock(double period_s, double max_ppm)
-    : window_(std::clamp(period_s / 30, 0.5, 10.0)), max_(max_ppm), settle_(kSettleWindows)
+    : p_window(std::clamp(period_s / 30, 0.5, 10.0)), p_max(max_ppm), p_settle(kSettleWindows)
 {
 	// The backlog integrates the rate error (1 ppm moves it 1 µs a second): a PI loop around
 	// it is a second-order system with this natural period, damping 0.7.
 	double wn = 2 * M_PI / period_s;
-	kp_ = 2 * 0.7 * wn * 1e6;
-	ki_ = wn * wn * 1e6;
+	p_kp = 2 * 0.7 * wn * 1e6;
+	p_ki = wn * wn * 1e6;
 }
 
 void RadioClock::update(double now, const ReadStats& s, double byte_rate)
 {
-	if (win_start_ < 0) win_start_ = now;
-	win_.gets += s.gets;
-	win_.waits += s.waits;
-	win_.discontinuities += s.discontinuities;
-	win_.backlog_sum += s.backlog_sum;
-	win_.since_put_sum += s.since_put_sum;
-	if (now - win_start_ < window_) return;
+	if (p_win_start < 0) p_win_start = now;
+	p_win.gets += s.gets;
+	p_win.waits += s.waits;
+	p_win.discontinuities += s.discontinuities;
+	p_win.backlog_sum += s.backlog_sum;
+	p_win.since_put_sum += s.since_put_sum;
+	if (now - p_win_start < p_window) return;
 	end_window(byte_rate);
-	win_ = {};
-	win_start_ = now;
+	p_win = {};
+	p_win_start = now;
 }
 
 void RadioClock::end_window(double byte_rate)
@@ -113,24 +113,24 @@ void RadioClock::end_window(double byte_rate)
 	// Only a window of steady reads says anything about the radio's clock. No reads (paused),
 	// a read that waited (the radio is ahead of us) or a cut backlog: settle again afterwards,
 	// around wherever the backlog is then.
-	if (win_.gets == 0 || win_.waits || win_.discontinuities || byte_rate <= 0) {
-		settle_ = kSettleWindows;
-		error_ = 0;
+	if (p_win.gets == 0 || p_win.waits || p_win.discontinuities || byte_rate <= 0) {
+		p_settle = kSettleWindows;
+		p_error = 0;
 		return;
 	}
-	double backlog = (win_.backlog_sum / byte_rate + win_.since_put_sum) / win_.gets;
-	if (settle_ > 0) {
-		if (--settle_ == 0) setpoint_ = backlog;
+	double backlog = (p_win.backlog_sum / byte_rate + p_win.since_put_sum) / p_win.gets;
+	if (p_settle > 0) {
+		if (--p_settle == 0) p_setpoint = backlog;
 		return;
 	}
 	// A falling backlog means the radio takes more than we make: speed up.
-	error_ = backlog - setpoint_;
-	integral_ = std::clamp(integral_ - ki_ * error_ * window_, -max_, max_);
+	p_error = backlog - p_setpoint;
+	p_integral = std::clamp(p_integral - p_ki * p_error * p_window, -p_max, p_max);
 }
 
 double RadioClock::trim_ppm() const
 {
-	return std::clamp(integral_ - kp_ * error_, -max_, max_);
+	return std::clamp(p_integral - p_kp * p_error, -p_max, p_max);
 }
 
 // ------------------------------------------------------------------------------ Resampler
@@ -150,13 +150,13 @@ double bessel_i0(double x)
 }  // namespace
 
 Resampler::Resampler(int channels)
-    : ch_(channels), coef_((kPhases + 1) * kTaps), delta_(kPhases * kTaps)
+    : p_ch(channels), p_coef((kPhases + 1) * kTaps), p_delta(kPhases * kTaps)
 {
 	// Cutoff at 0.91 of Nyquist (20 kHz at 44.1), Kaiser window: flat through the audio band
 	// with about 70 dB of stopband. At ratios this close to 1 there is next to nothing to alias.
 	const double fc = 0.91, beta = 7.0, half = kTaps / 2.0;
 	for (int j = 0; j <= kPhases; j++) {
-		float* row = &coef_[j * kTaps];
+		float* row = &p_coef[j * kTaps];
 		double frac = double(j) / kPhases, sum = 0;
 		for (int k = 0; k < kTaps; k++) {
 			double x = k - (half - 1) - frac;  // distance from the output instant, in frames
@@ -169,36 +169,36 @@ Resampler::Resampler(int channels)
 		}
 		for (int k = 0; k < kTaps; k++) row[k] = float(row[k] / sum);
 	}
-	for (int i = 0; i < kPhases * kTaps; i++) delta_[i] = coef_[i + kTaps] - coef_[i];
-	coef_.resize(kPhases * kTaps);
+	for (int i = 0; i < kPhases * kTaps; i++) p_delta[i] = p_coef[i + kTaps] - p_coef[i];
+	p_coef.resize(kPhases * kTaps);
 	reset();
 }
 
 void Resampler::reset()
 {
-	hist_.assign(size_t(kTaps / 2 - 1) * ch_, 0.f);
-	pos_ = kTaps / 2 - 1;
+	p_hist.assign(size_t(kTaps / 2 - 1) * p_ch, 0.f);
+	p_pos = kTaps / 2 - 1;
 }
 
 void Resampler::process(const int16_t* in, size_t frames, double ratio, std::vector<int16_t>& out)
 {
-	hist_.insert(hist_.end(), in, in + frames * ch_);
-	const long have = long(hist_.size() / ch_);
+	p_hist.insert(p_hist.end(), in, in + frames * p_ch);
+	const long have = long(p_hist.size() / p_ch);
 	const double step = 1.0 / ratio;
 	auto clip = [](float v) { return int16_t(std::clamp(std::lrint(v), -32768L, 32767L)); };
 	static_assert(kTaps % 4 == 0, "the loops below take taps four at a time");
-	for (long i; (i = long(pos_)) + kTaps / 2 < have; pos_ += step) {
-		double fp = (pos_ - i) * kPhases;
+	for (long i; (i = long(p_pos)) + kTaps / 2 < have; p_pos += step) {
+		double fp = (p_pos - i) * kPhases;
 		int j = int(fp);
 		float a = float(fp - j);
 
 		// The phase's coefficients, interpolated toward the next phase's, are made on the fly.
 		// Four sums per channel instead of one: the ARM11's VFP takes 8 cycles per dependent
 		// multiply-add, so one running sum would stall on every tap.
-		const float* c = &coef_[j * kTaps];
-		const float* d = &delta_[j * kTaps];
-		const float* x = &hist_[size_t(i - kTaps / 2 + 1) * ch_];
-		if (ch_ == 2) {
+		const float* c = &p_coef[j * kTaps];
+		const float* d = &p_delta[j * kTaps];
+		const float* x = &p_hist[size_t(i - kTaps / 2 + 1) * p_ch];
+		if (p_ch == 2) {
 			float l0 = 0, l1 = 0, l2 = 0, l3 = 0, r0 = 0, r1 = 0, r2 = 0, r3 = 0;
 			for (int k = 0; k < kTaps; k += 4, x += 8) {
 				float c0 = c[k] + a * d[k], c1 = c[k + 1] + a * d[k + 1];
@@ -215,17 +215,17 @@ void Resampler::process(const int16_t* in, size_t frames, double ratio, std::vec
 			out.push_back(clip((l0 + l1) + (l2 + l3)));
 			out.push_back(clip((r0 + r1) + (r2 + r3)));
 		} else {
-			for (int ch = 0; ch < ch_; ch++) {
+			for (int ch = 0; ch < p_ch; ch++) {
 				float v = 0;
-				for (int k = 0; k < kTaps; k++) v += (c[k] + a * d[k]) * x[k * ch_ + ch];
+				for (int k = 0; k < kTaps; k++) v += (c[k] + a * d[k]) * x[k * p_ch + ch];
 				out.push_back(clip(v));
 			}
 		}
 	}
 	// Keep only the frames a later output still reaches back to.
-	long first = long(pos_) - kTaps / 2 + 1;
+	long first = long(p_pos) - kTaps / 2 + 1;
 	if (first > 0) {
-		hist_.erase(hist_.begin(), hist_.begin() + first * ch_);
-		pos_ -= first;
+		p_hist.erase(p_hist.begin(), p_hist.begin() + first * p_ch);
+		p_pos -= first;
 	}
 }

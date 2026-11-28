@@ -58,11 +58,11 @@ class FatVolume
 public:
 	FatVolume(std::vector<VirtualFile> files, const FatOptions& opt);
 
-	uint64_t total_sectors() const { return total_sectors_; }
+	uint64_t total_sectors() const { return p_total_sectors; }
 	void read(uint64_t lba, uint32_t count, uint8_t* out);
 	void write(uint64_t lba, const uint8_t* data, uint32_t count);
 
-	const std::vector<VirtualFile>& files() const { return files_; }
+	const std::vector<VirtualFile>& files() const { return p_files; }
 
 private:
 	uint32_t read_run(uint64_t lba, uint32_t max, uint8_t* out, int& first_file);
@@ -74,13 +74,13 @@ private:
 	Bytes directory();
 	int file_at(uint32_t cluster) const;
 
-	std::vector<VirtualFile> files_;
-	std::vector<std::string> frozen_names_;
-	FatOptions opt_;
-	uint32_t spc_, clusters_, fat_sectors_, reserved_, root_entries_, root_sectors_;
-	uint32_t root_start_, data_start_, part_sectors_;
-	uint64_t total_sectors_;
-	std::mutex overlay_mu_;
+	std::vector<VirtualFile> p_files;
+	std::vector<std::string> p_frozen_names;
+	FatOptions p_opt;
+	uint32_t p_spc, p_clusters, p_fat_sectors, p_reserved, p_root_entries, p_root_sectors;
+	uint32_t p_root_start, p_data_start, p_part_sectors;
+	uint64_t p_total_sectors;
+	std::mutex p_overlay_mu;
 	/// sectors the host wrote, kept in RAM
-	std::map<uint64_t, Bytes> overlay_;
+	std::map<uint64_t, Bytes> p_overlay;
 };

@@ -58,16 +58,16 @@ class SbcDecoder : public Decoder
 public:
 	bool init(const Bytes& config)
 	{
-		if (config.size() < 4 || sbc_init_a2dp(&sbc_, 0, config.data(), config.size()) < 0)
+		if (config.size() < 4 || sbc_init_a2dp(&p_sbc, 0, config.data(), config.size()) < 0)
 			return false;
-		sbc_.endian = SBC_LE;
-		mono_ = (config[0] & 0x0F) == 0x08;
-		ok_ = true;
+		p_sbc.endian = SBC_LE;
+		p_mono = (config[0] & 0x0F) == 0x08;
+		p_ok = true;
 		return true;
 	}
 	~SbcDecoder() override
 	{
-		if (ok_) sbc_finish(&sbc_);
+		if (p_ok) sbc_finish(&p_sbc);
 	}
 	void decode(const uint8_t* p, size_t n, std::vector<int16_t>& out) override
 	{
@@ -77,23 +77,23 @@ public:
 		for (int f = 0; f < frames && n; f++) {
 			size_t written = 0;
 			ssize_t used =
-			    sbc_decode(&sbc_, p, n, reinterpret_cast<uint8_t*>(buf_), sizeof buf_, &written);
+			    sbc_decode(&p_sbc, p, n, reinterpret_cast<uint8_t*>(p_buf), sizeof p_buf, &written);
 			if (used <= 0) break;
 			p += used;
 			n -= used;
 			size_t samples = written / 2;
-			if (mono_) {
-				for (size_t i = 0; i < samples; i++) out.insert(out.end(), 2, buf_[i]);
+			if (p_mono) {
+				for (size_t i = 0; i < samples; i++) out.insert(out.end(), 2, p_buf[i]);
 			} else {
-				out.insert(out.end(), buf_, buf_ + samples);
+				out.insert(out.end(), p_buf, p_buf + samples);
 			}
 		}
 	}
 
 private:
-	sbc_t sbc_{};
-	bool ok_ = false, mono_ = false;
-	int16_t buf_[2 * 128];  // one frame: up to 16 blocks of 8 subbands, two channels
+	sbc_t p_sbc{};
+	bool p_ok = false, p_mono = false;
+	int16_t p_buf[2 * 128];  // one frame: up to 16 blocks of 8 subbands, two channels
 };
 
 // AAC ------------------------------------------------------------------------------------------
@@ -107,19 +107,19 @@ class AacDecoder : public Decoder
 public:
 	bool init()
 	{
-		h_ = aacDecoder_Open(TT_MP4_LATM_MCP1, 1);
-		if (!h_) return false;
+		p_h = aacDecoder_Open(TT_MP4_LATM_MCP1, 1);
+		if (!p_h) return false;
 
 		// Always two channels out (mono doubled). No limiter: it costs CPU and adds delay, and
 		// the phone's encoder doesn't clip.
-		aacDecoder_SetParam(h_, AAC_PCM_MIN_OUTPUT_CHANNELS, 2);
-		aacDecoder_SetParam(h_, AAC_PCM_MAX_OUTPUT_CHANNELS, 2);
-		aacDecoder_SetParam(h_, AAC_PCM_LIMITER_ENABLE, 0);
+		aacDecoder_SetParam(p_h, AAC_PCM_MIN_OUTPUT_CHANNELS, 2);
+		aacDecoder_SetParam(p_h, AAC_PCM_MAX_OUTPUT_CHANNELS, 2);
+		aacDecoder_SetParam(p_h, AAC_PCM_LIMITER_ENABLE, 0);
 		return true;
 	}
 	~AacDecoder() override
 	{
-		if (h_) aacDecoder_Close(h_);
+		if (p_h) aacDecoder_Close(p_h);
 	}
 	void decode(const uint8_t* p, size_t n, std::vector<int16_t>& out) override
 	{
@@ -128,32 +128,32 @@ public:
 		UINT size = UINT(n), valid = UINT(n);
 		while (valid) {
 			UINT before = valid;
-			if (aacDecoder_Fill(h_, &in, &size, &valid) != AAC_DEC_OK) return;
+			if (aacDecoder_Fill(p_h, &in, &size, &valid) != AAC_DEC_OK) return;
 			bool took = valid != before;
 			while (true) {
 				AAC_DECODER_ERROR e =
-				    aacDecoder_DecodeFrame(h_, buf_, sizeof buf_ / sizeof buf_[0], 0);
+				    aacDecoder_DecodeFrame(p_h, p_buf, sizeof p_buf / sizeof p_buf[0], 0);
 				if (e == AAC_DEC_NOT_ENOUGH_BITS) break;
 				if (e != AAC_DEC_OK) {
 					// Most likely a split frame whose start was lost, or a packet before the
 					// first StreamMuxConfig: start over with the next packet.
-					if (!errors_++) LOGD("a2dp: AAC decode error 0x%04x", e);
+					if (!p_errors++) LOGD("a2dp: AAC decode error 0x%04x", e);
 					lost();
 					return;
 				}
-				CStreamInfo* si = aacDecoder_GetStreamInfo(h_);
+				CStreamInfo* si = aacDecoder_GetStreamInfo(p_h);
 				if (!si || si->numChannels != 2) continue;
-				out.insert(out.end(), buf_, buf_ + size_t(si->frameSize) * 2);
+				out.insert(out.end(), p_buf, p_buf + size_t(si->frameSize) * 2);
 			}
 			if (!took) return;
 		}
 	}
-	void lost() override { aacDecoder_SetParam(h_, AAC_TPDEC_CLEAR_BUFFER, 1); }
+	void lost() override { aacDecoder_SetParam(p_h, AAC_TPDEC_CLEAR_BUFFER, 1); }
 
 private:
-	HANDLE_AACDECODER h_ = nullptr;
-	unsigned errors_ = 0;
-	INT_PCM buf_[2 * 2048];  // one frame: 1024 samples (2048 with SBR), two channels
+	HANDLE_AACDECODER p_h = nullptr;
+	unsigned p_errors = 0;
+	INT_PCM p_buf[2 * 2048];  // one frame: 1024 samples (2048 with SBR), two channels
 };
 #endif
 
@@ -165,33 +165,33 @@ private:
 class AptxDecoder : public Decoder
 {
 public:
-	explicit AptxDecoder(bool hd) : hd_(hd) {}
-	bool init() { return (ctx_ = aptx_init(hd_)) != nullptr; }
+	explicit AptxDecoder(bool hd) : p_hd(hd) {}
+	bool init() { return (p_ctx = aptx_init(p_hd)) != nullptr; }
 	~AptxDecoder() override
 	{
-		if (ctx_) aptx_finish(ctx_);
+		if (p_ctx) aptx_finish(p_ctx);
 	}
-	bool rtp() const override { return hd_; }
+	bool rtp() const override { return p_hd; }
 	void decode(const uint8_t* p, size_t n, std::vector<int16_t>& out) override
 	{
 		// Room for all of it plus the one sample decode_sync may keep from before.
-		buf_.resize((n / (hd_ ? 6 : 4) + 1) * 24 + 24);
+		p_buf.resize((n / (p_hd ? 6 : 4) + 1) * 24 + 24);
 		size_t written = 0, dropped = 0;
 		int synced = 0;
-		aptx_decode_sync(ctx_, p, n, buf_.data(), buf_.size(), &written, &synced, &dropped);
-		if ((dropped || !synced) && !resyncs_++)
+		aptx_decode_sync(p_ctx, p, n, p_buf.data(), p_buf.size(), &written, &synced, &dropped);
+		if ((dropped || !synced) && !p_resyncs++)
 			LOGD("a2dp: aptX lost sync (%zu bytes dropped)", dropped);
 		size_t base = out.size();
 		out.resize(base + written / 3);
 		for (size_t i = 0; i < written / 3; i++)
-			out[base + i] = int16_t(buf_[3 * i + 1] | buf_[3 * i + 2] << 8);
+			out[base + i] = int16_t(p_buf[3 * i + 1] | p_buf[3 * i + 2] << 8);
 	}
 
 private:
-	bool hd_;
-	aptx_context* ctx_ = nullptr;
-	unsigned resyncs_ = 0;
-	std::vector<uint8_t> buf_;
+	bool p_hd;
+	aptx_context* p_ctx = nullptr;
+	unsigned p_resyncs = 0;
+	std::vector<uint8_t> p_buf;
 };
 #endif
 

@@ -91,52 +91,52 @@ private:
 	                      ...);
 	void set_central(const std::string& adapter);
 	void reconnect();
-	/// with mu_ held
+	/// with p_mu held
 	void recompute();
-	/// with mu_ held
+	/// with p_mu held
 	const PlayerObj* active() const;
 	void set_prop_async(const std::string& path, const char* iface, const char* name, char type,
 	                    int value);
 
-	BluezOptions opt_;
-	A2dpSink* a2dp_;
-	std::atomic<bool> quit_{false};
+	BluezOptions p_opt;
+	A2dpSink* p_a2dp;
+	std::atomic<bool> p_quit{false};
 	/// the bus thread only
-	bool bluez_up_ = false;
-	sd_bus* bus_ = nullptr;
-	sd_event* event_ = nullptr;
-	int wake_fd_ = -1;
-	std::thread thread_;
-	size_t reconnect_idx_ = 0;
-	double last_reconnect_ = 0;
-	double started_ = 0;
+	bool p_bluez_up = false;
+	sd_bus* p_bus = nullptr;
+	sd_event* p_event = nullptr;
+	int p_wake_fd = -1;
+	std::thread p_thread;
+	size_t p_reconnect_idx = 0;
+	double p_last_reconnect = 0;
+	double p_started = 0;
 	/// a Connect is out (it takes up to a page timeout)
-	bool connecting_ = false;
+	bool p_connecting = false;
 	/// address
-	std::string last_phone_;
-	/// with mu_
-	std::string last_phone_name_;
-	/// with mu_: when last_phone_file was last tried
-	double last_phone_read_ = -1e9;
-	/// with mu_
+	std::string p_last_phone;
+	/// with p_mu
+	std::string p_last_phone_name;
+	/// with p_mu: when last_phone_file was last tried
+	double p_last_phone_read = -1e9;
+	/// with p_mu
 	void load_last_phone();
 
-	std::mutex mu_;
-	std::condition_variable cv_;
-	std::set<std::string> adapters_;
-	std::map<std::string, Device> devices_;
-	std::map<std::string, PlayerObj> players_;
-	std::set<std::string> transports_;
-	TrackInfo track_;
-	std::string status_ = "stopped";
-	bool has_player_ = false;
-	uint64_t version_ = 1;
-	std::deque<std::string> commands_;
+	std::mutex p_mu;
+	std::condition_variable p_cv;
+	std::set<std::string> p_adapters;
+	std::map<std::string, Device> p_devices;
+	std::map<std::string, PlayerObj> p_players;
+	std::set<std::string> p_transports;
+	TrackInfo p_track;
+	std::string p_status = "stopped";
+	bool p_has_player = false;
+	uint64_t p_version = 1;
+	std::deque<std::string> p_commands;
 
 	/// One track change sent to the phone that the phone has not finished yet.
 	///
 	/// A phone drops a Next or Previous that comes before it has switched tracks, so
-	/// run_commands() sends one Step at a time and holds back the rest of commands_ until it is
+	/// run_commands() sends one Step at a time and holds back the rest of p_commands until it is
 	/// done. It is done when the track's name changed, when the phone moved its position back
 	/// to 0 (a Previous that only restarted the track gets one more Previous first), or at the
 	/// deadline.
@@ -159,8 +159,8 @@ private:
 		/// when the command was sent, for the log
 		double sent = 0;
 	};
-	/// the Step the phone is carrying out, valid while step_active_
-	Step step_;
-	/// a Step is out: further Next/Previous wait in commands_
-	bool step_active_ = false;
+	/// the Step the phone is carrying out, valid while p_step_active
+	Step p_step;
+	/// a Step is out: further Next/Previous wait in p_commands
+	bool p_step_active = false;
 };

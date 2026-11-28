@@ -84,54 +84,54 @@ void chs(uint32_t lba, uint8_t* out)
 }  // namespace
 
 FatVolume::FatVolume(std::vector<VirtualFile> files, const FatOptions& opt)
-    : files_(std::move(files)), opt_(opt)
+    : p_files(std::move(files)), p_opt(opt)
 {
 	if (opt.cluster_size < kSector || opt.cluster_size > 65536 ||
 	    (opt.cluster_size & (opt.cluster_size - 1)))
 		throw std::invalid_argument("cluster size must be a power of two, 512..65536");
-	spc_ = opt.cluster_size / kSector;
+	p_spc = opt.cluster_size / kSector;
 	uint32_t pad = (opt.pad_bytes + opt.cluster_size - 1) / opt.cluster_size;
 	uint32_t next = (opt.fat32 ? 3 : 2) + pad;
-	for (auto& f : files_) {
+	for (auto& f : p_files) {
 		f.clusters =
 		    std::max<uint32_t>(1, (uint64_t(f.size) + opt.cluster_size - 1) / opt.cluster_size);
 		f.first_cluster = next;
 		next += f.clusters;
-		frozen_names_.push_back(f.long_name ? f.long_name() : "");
+		p_frozen_names.push_back(f.long_name ? f.long_name() : "");
 	}
 	uint32_t used = next - 2 + pad;
 	if (opt.fat32) {
-		clusters_ = std::max<uint32_t>(used, 65525 + 64);
+		p_clusters = std::max<uint32_t>(used, 65525 + 64);
 	} else {
-		clusters_ = std::max<uint32_t>(used, 4085 + 64);
-		if (clusters_ >= 65525)
+		p_clusters = std::max<uint32_t>(used, 4085 + 64);
+		if (p_clusters >= 65525)
 			throw std::invalid_argument("FAT16 holds at most 65524 clusters: use fat32, "
 			                            "bigger clusters or smaller files");
 	}
 	uint32_t entry = opt.fat32 ? 4 : 2;
-	fat_sectors_ = (uint64_t(clusters_ + 2) * entry + kSector - 1) / kSector;
-	root_entries_ = opt.fat32 ? 0 : 512;
-	root_sectors_ = root_entries_ * 32 / kSector;
-	reserved_ = opt.fat32 ? 32 : 1;
+	p_fat_sectors = (uint64_t(p_clusters + 2) * entry + kSector - 1) / kSector;
+	p_root_entries = opt.fat32 ? 0 : 512;
+	p_root_sectors = p_root_entries * 32 / kSector;
+	p_reserved = opt.fat32 ? 32 : 1;
 	// Align the data area to a cluster on the disk, as real formatters do.
-	while ((opt.partition_offset + reserved_ + 2 * fat_sectors_ + root_sectors_) % spc_)
-		reserved_++;
-	root_start_ = reserved_ + 2 * fat_sectors_;
-	data_start_ = root_start_ + root_sectors_;
-	part_sectors_ = data_start_ + clusters_ * spc_;
-	total_sectors_ = uint64_t(opt.partition_offset) + part_sectors_;
+	while ((opt.partition_offset + p_reserved + 2 * p_fat_sectors + p_root_sectors) % p_spc)
+		p_reserved++;
+	p_root_start = p_reserved + 2 * p_fat_sectors;
+	p_data_start = p_root_start + p_root_sectors;
+	p_part_sectors = p_data_start + p_clusters * p_spc;
+	p_total_sectors = uint64_t(opt.partition_offset) + p_part_sectors;
 }
 
 void FatVolume::mbr(uint8_t* s) const
 {
 	memset(s, 0, kSector);
-	put_le32(s + 440, opt_.volume_id);
+	put_le32(s + 440, p_opt.volume_id);
 	uint8_t* e = s + 446;
-	chs(opt_.partition_offset, e + 1);
-	e[4] = opt_.fat32 ? 0x0C : 0x06;
-	chs(total_sectors_ - 1, e + 5);
-	put_le32(e + 8, opt_.partition_offset);
-	put_le32(e + 12, part_sectors_);
+	chs(p_opt.partition_offset, e + 1);
+	e[4] = p_opt.fat32 ? 0x0C : 0x06;
+	chs(p_total_sectors - 1, e + 5);
+	put_le32(e + 8, p_opt.partition_offset);
+	put_le32(e + 12, p_part_sectors);
 	s[510] = 0x55;
 	s[511] = 0xAA;
 }
@@ -141,38 +141,38 @@ void FatVolume::boot_sector(uint8_t* s) const
 	memset(s, 0, kSector);
 	uint8_t label[11];
 	memset(label, ' ', 11);
-	for (size_t i = 0; i < opt_.label.size() && i < 11; i++) label[i] = toupper(opt_.label[i]);
+	for (size_t i = 0; i < p_opt.label.size() && i < 11; i++) label[i] = toupper(p_opt.label[i]);
 	s[0] = 0xEB;
-	s[1] = opt_.fat32 ? 0x58 : 0x3C;
+	s[1] = p_opt.fat32 ? 0x58 : 0x3C;
 	s[2] = 0x90;
 	memcpy(s + 3, "MSWIN4.1", 8);
 	put_le16(s + 11, kSector);
-	s[13] = spc_;
-	put_le16(s + 14, reserved_);
+	s[13] = p_spc;
+	put_le16(s + 14, p_reserved);
 	s[16] = 2;
-	put_le16(s + 17, root_entries_);
-	bool small = !opt_.fat32 && part_sectors_ < 65536;
-	put_le16(s + 19, small ? part_sectors_ : 0);
+	put_le16(s + 17, p_root_entries);
+	bool small = !p_opt.fat32 && p_part_sectors < 65536;
+	put_le16(s + 19, small ? p_part_sectors : 0);
 	s[21] = 0xF8;
-	put_le16(s + 22, opt_.fat32 ? 0 : fat_sectors_);
+	put_le16(s + 22, p_opt.fat32 ? 0 : p_fat_sectors);
 	put_le16(s + 24, 63);
 	put_le16(s + 26, 255);
-	put_le32(s + 28, opt_.partition_offset);
-	put_le32(s + 32, small ? 0 : part_sectors_);
-	if (opt_.fat32) {
-		put_le32(s + 36, fat_sectors_);
+	put_le32(s + 28, p_opt.partition_offset);
+	put_le32(s + 32, small ? 0 : p_part_sectors);
+	if (p_opt.fat32) {
+		put_le32(s + 36, p_fat_sectors);
 		put_le32(s + 44, 2);  // root cluster
 		put_le16(s + 48, 1);  // FSInfo
 		put_le16(s + 50, 6);  // backup boot sector
 		s[64] = 0x80;
 		s[66] = 0x29;
-		put_le32(s + 67, opt_.volume_id);
+		put_le32(s + 67, p_opt.volume_id);
 		memcpy(s + 71, label, 11);
 		memcpy(s + 82, "FAT32   ", 8);
 	} else {
 		s[36] = 0x80;
 		s[38] = 0x29;
-		put_le32(s + 39, opt_.volume_id);
+		put_le32(s + 39, p_opt.volume_id);
 		memcpy(s + 43, label, 11);
 		memcpy(s + 54, "FAT16   ", 8);
 	}
@@ -184,10 +184,10 @@ void FatVolume::fsinfo(uint8_t* s) const
 {
 	memset(s, 0, kSector);
 	uint32_t used = 1;  // the root directory
-	for (auto& f : files_) used += f.clusters;
+	for (auto& f : p_files) used += f.clusters;
 	put_le32(s, 0x41615252);
 	put_le32(s + 484, 0x61417272);
-	put_le32(s + 488, clusters_ - used);
+	put_le32(s + 488, p_clusters - used);
 	put_le32(s + 492, 0xFFFFFFFF);  // next free cluster: unknown (allowed by the spec)
 	put_le32(s + 508, 0xAA550000);
 }
@@ -195,7 +195,7 @@ void FatVolume::fsinfo(uint8_t* s) const
 void FatVolume::fat_sector(uint32_t n, uint8_t* s) const
 {
 	memset(s, 0, kSector);
-	bool f32 = opt_.fat32;
+	bool f32 = p_opt.fat32;
 	uint32_t per = f32 ? kSector / 4 : kSector / 2;
 	uint32_t i0 = n * per, i1 = i0 + per;
 	uint32_t eoc = f32 ? 0x0FFFFFFF : 0xFFFF;
@@ -210,7 +210,7 @@ void FatVolume::fat_sector(uint32_t n, uint8_t* s) const
 		for (uint32_t c = a; c <= b && c >= a; c++) set(c, c == end ? eoc : c + 1);
 	};
 	if (f32) run(2, 2);
-	for (auto& f : files_) {
+	for (auto& f : p_files) {
 		if (f.first_cluster + f.clusters <= i0 || f.first_cluster >= i1) continue;
 		run(f.first_cluster, f.first_cluster + f.clusters - 1);
 	}
@@ -225,13 +225,13 @@ Bytes FatVolume::directory()
 	Bytes d;
 	uint8_t label[11];
 	memset(label, ' ', 11);
-	for (size_t i = 0; i < opt_.label.size() && i < 11; i++) label[i] = toupper(opt_.label[i]);
+	for (size_t i = 0; i < p_opt.label.size() && i < 11; i++) label[i] = toupper(p_opt.label[i]);
 	dir_entry(d, label, 0x08, 0, 0);
-	for (size_t i = 0; i < files_.size(); i++) {
-		auto& f = files_[i];
+	for (size_t i = 0; i < p_files.size(); i++) {
+		auto& f = p_files[i];
 		uint8_t sfn[11];
 		sfn_bytes(f.short_name, sfn);
-		std::string name = opt_.dynamic_names && f.long_name ? f.long_name() : frozen_names_[i];
+		std::string name = p_opt.dynamic_names && f.long_name ? f.long_name() : p_frozen_names[i];
 		if (!name.empty()) lfn_entries(d, to_ucs2(name, Charset::Unicode), sfn);
 		dir_entry(d, sfn, 0x20, f.first_cluster, f.size);
 	}
@@ -248,9 +248,9 @@ void FatVolume::dir_sector(uint32_t n, uint8_t* s)
 
 int FatVolume::file_at(uint32_t cluster) const
 {
-	for (size_t i = 0; i < files_.size(); i++)
-		if (cluster >= files_[i].first_cluster &&
-		    cluster < files_[i].first_cluster + files_[i].clusters)
+	for (size_t i = 0; i < p_files.size(); i++)
+		if (cluster >= p_files[i].first_cluster &&
+		    cluster < p_files[i].first_cluster + p_files[i].clusters)
 			return int(i);
 	return -1;
 }
@@ -269,46 +269,46 @@ void FatVolume::read(uint64_t lba, uint32_t count, uint8_t* out)
 uint32_t FatVolume::read_run(uint64_t lba, uint32_t max, uint8_t* out, int& first_file)
 {
 	{
-		std::lock_guard<std::mutex> lk(overlay_mu_);
-		auto it = overlay_.find(lba);
-		if (it != overlay_.end()) {
+		std::lock_guard<std::mutex> lk(p_overlay_mu);
+		auto it = p_overlay.find(lba);
+		if (it != p_overlay.end()) {
 			memcpy(out, it->second.data(), kSector);
 			return 1;
 		}
 	}
-	if (lba >= total_sectors_ || lba < opt_.partition_offset) {
-		if (lba == 0 && opt_.partition_offset)
+	if (lba >= p_total_sectors || lba < p_opt.partition_offset) {
+		if (lba == 0 && p_opt.partition_offset)
 			mbr(out);
 		else
 			memset(out, 0, kSector);
 		return 1;
 	}
-	uint32_t s = lba - opt_.partition_offset;
-	if (s < reserved_) {
-		if (s == 0 || (opt_.fat32 && s == 6))
+	uint32_t s = lba - p_opt.partition_offset;
+	if (s < p_reserved) {
+		if (s == 0 || (p_opt.fat32 && s == 6))
 			boot_sector(out);
-		else if (opt_.fat32 && (s == 1 || s == 7))
+		else if (p_opt.fat32 && (s == 1 || s == 7))
 			fsinfo(out);
 		else {
 			memset(out, 0, kSector);
-			if (opt_.fat32 && (s == 2 || s == 8)) {
+			if (p_opt.fat32 && (s == 2 || s == 8)) {
 				out[510] = 0x55;
 				out[511] = 0xAA;
 			}
 		}
 		return 1;
 	}
-	if (s < root_start_) {
-		fat_sector((s - reserved_) % fat_sectors_, out);
+	if (s < p_root_start) {
+		fat_sector((s - p_reserved) % p_fat_sectors, out);
 		return 1;
 	}
-	if (s < data_start_) {
-		dir_sector(s - root_start_, out);
+	if (s < p_data_start) {
+		dir_sector(s - p_root_start, out);
 		return 1;
 	}
-	uint32_t rel = s - data_start_;
-	uint32_t cluster = 2 + rel / spc_;
-	if (opt_.fat32 && cluster == 2) {
+	uint32_t rel = s - p_data_start;
+	uint32_t cluster = 2 + rel / p_spc;
+	if (p_opt.fat32 && cluster == 2) {
 		dir_sector(rel, out);
 		return 1;
 	}
@@ -317,14 +317,14 @@ uint32_t FatVolume::read_run(uint64_t lba, uint32_t max, uint8_t* out, int& firs
 		memset(out, 0, kSector);
 		return 1;
 	}
-	auto& f = files_[idx];
-	uint32_t file_sector = rel - (f.first_cluster - 2) * spc_;
-	uint32_t n = std::min(max, f.clusters * spc_ - file_sector);
+	auto& f = p_files[idx];
+	uint32_t file_sector = rel - (f.first_cluster - 2) * p_spc;
+	uint32_t n = std::min(max, f.clusters * p_spc - file_sector);
 	{
-		std::lock_guard<std::mutex> lk(overlay_mu_);
-		if (!overlay_.empty()) {
-			auto it = overlay_.lower_bound(lba + 1);
-			if (it != overlay_.end() && it->first < lba + n) n = it->first - lba;
+		std::lock_guard<std::mutex> lk(p_overlay_mu);
+		if (!p_overlay.empty()) {
+			auto it = p_overlay.lower_bound(lba + 1);
+			if (it != p_overlay.end() && it->first < lba + n) n = it->first - lba;
 		}
 	}
 	uint64_t off = uint64_t(file_sector) * kSector, len = uint64_t(n) * kSector;
@@ -342,9 +342,9 @@ uint32_t FatVolume::read_run(uint64_t lba, uint32_t max, uint8_t* out, int& firs
 
 void FatVolume::write(uint64_t lba, const uint8_t* data, uint32_t count)
 {
-	std::lock_guard<std::mutex> lk(overlay_mu_);
+	std::lock_guard<std::mutex> lk(p_overlay_mu);
 	for (uint32_t i = 0; i < count; i++) {
-		if (overlay_.size() >= 8192 && !overlay_.count(lba + i)) break;  // 4 MiB cap
-		overlay_[lba + i] = Bytes(data + i * kSector, data + (i + 1) * kSector);
+		if (p_overlay.size() >= 8192 && !p_overlay.count(lba + i)) break;  // 4 MiB cap
+		p_overlay[lba + i] = Bytes(data + i * kSector, data + (i + 1) * kSector);
 	}
 }

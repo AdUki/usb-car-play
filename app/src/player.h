@@ -132,11 +132,11 @@ public:
 	/// about once a second: pause following
 	void tick();
 
-	uint32_t file_size() const { return lay_.file; }
-	uint32_t header_size() const { return lay_.header; }
-	uint32_t data_size() const { return lay_.data; }
-	int current() const { return current_; }
-	const LiveFileData& data() const { return data_; }
+	uint32_t file_size() const { return p_lay.file; }
+	uint32_t header_size() const { return p_lay.header; }
+	uint32_t data_size() const { return p_lay.data; }
+	int current() const { return p_current; }
+	const LiveFileData& data() const { return p_data; }
 	/// recent decisions, for tests and the log
 	std::vector<std::string> events();
 
@@ -162,46 +162,46 @@ private:
 	void event(const std::string& e);
 	void latency_changed();
 
-	PlayerConfig cfg_;
-	LiveStream& stream_;
-	const Encoder& enc_;
-	MediaControl& control_;
+	PlayerConfig p_cfg;
+	LiveStream& p_stream;
+	const Encoder& p_enc;
+	MediaControl& p_control;
 	struct Layout
 	{
 		std::string ext;
 		uint32_t align, header, tail, data, file;
 	};
 	static Layout layout_for(const PlayerConfig& cfg);
-	Layout lay_;
-	LiveFileData data_;
-	std::recursive_mutex mu_;
-	std::atomic<int> current_{-1};
-	double guard_until_;
-	std::map<int, TrackInfo> header_snap_;
-	double last_data_read_ = 0, interval_ = 0;
-	bool paused_by_us_ = false, autoplay_done_ = false, settled_ = false;
+	Layout p_lay;
+	LiveFileData p_data;
+	std::recursive_mutex p_mu;
+	std::atomic<int> p_current{-1};
+	double p_guard_until;
+	std::map<int, TrackInfo> p_header_snap;
+	double p_last_data_read = 0, p_interval = 0;
+	bool p_paused_by_us = false, p_autoplay_done = false, p_settled = false;
 	/// at the last data read
-	bool phone_connected_ = false;
+	bool p_phone_connected = false;
 	/// sequential reads near a file's end (see read_file)
-	int tail_file_ = -1;
+	int p_tail_file = -1;
 	/// the last data read before settling (see read_file)
-	int scan_file_ = -1;
-	uint64_t scan_next_ = 0;
-	uint64_t tail_next_ = 0, tail_bytes_ = 0;
+	int p_scan_file = -1;
+	uint64_t p_scan_next = 0;
+	uint64_t p_tail_next = 0, p_tail_bytes = 0;
 	/// the current file read again at its start
-	bool restart_pending_ = false;
+	bool p_restart_pending = false;
 	/// ... when the radio came back from elsewhere
-	bool restart_away_ = false;
-	uint64_t restart_next_ = 0;
+	bool p_restart_away = false;
+	uint64_t p_restart_next = 0;
 	/// when the phone's song last started over
-	std::atomic<double> phone_switched_at_{-1e9};
+	std::atomic<double> p_phone_switched_at{-1e9};
 
 	/// @name The mute after Next/Previous ends when both the phone has switched and the radio
 	/// streams
 	/// @{
 	/// 0: still switching
-	std::atomic<double> phone_done_at_{0};
-	std::atomic<bool> radio_live_{true};
+	std::atomic<double> p_phone_done_at{0};
+	std::atomic<bool> p_radio_live{true};
 	/// @}
 	struct ReadRec
 	{
@@ -210,22 +210,22 @@ private:
 		uint32_t off, n;
 	};
 	/// log.trace: a ring of the last reads
-	std::vector<ReadRec> reads_;
-	size_t reads_at_ = 0;
-	std::thread watch_;
-	std::mutex watch_mu_;
-	std::condition_variable watch_cv_;
+	std::vector<ReadRec> p_reads;
+	size_t p_reads_at = 0;
+	std::thread p_watch;
+	std::mutex p_watch_mu;
+	std::condition_variable p_watch_cv;
 	/// commands sent / seen carried out
-	uint64_t watch_gen_ = 0, watched_gen_ = 0;
-	double watch_t0_ = 0, watch_max_ = 0;
-	bool watch_restart_ = false;
-	bool watch_stop_ = false;
+	uint64_t p_watch_gen = 0, p_watched_gen = 0;
+	double p_watch_t0 = 0, p_watch_max = 0;
+	bool p_watch_restart = false;
+	bool p_watch_stop = false;
 	/// the log's read trace: where the last read ended
-	int trace_file_ = -1;
-	uint64_t trace_next_ = 0;
-	double last_read_ = 0;
-	/// last given to control_.set_delay
-	double latency_ = 0;
-	std::mutex ev_mu_;
-	std::vector<std::string> events_;
+	int p_trace_file = -1;
+	uint64_t p_trace_next = 0;
+	double p_last_read = 0;
+	/// last given to p_control.set_delay
+	double p_latency = 0;
+	std::mutex p_ev_mu;
+	std::vector<std::string> p_events;
 };

@@ -20,33 +20,34 @@ Player::Layout Player::layout_for(const PlayerConfig& cfg)
 }
 
 Player::Player(const PlayerConfig& cfg, LiveStream& stream, MediaControl& control)
-    : cfg_(cfg), stream_(stream), enc_(stream.encoder()), control_(control), lay_(layout_for(cfg)),
-      data_(stream, lay_.data, lay_.align, cfg.target_latency_s, cfg.max_block_s, cfg.cache_bytes),
-      guard_until_(now_s() + cfg.guard_s)
+    : p_cfg(cfg), p_stream(stream), p_enc(stream.encoder()), p_control(control),
+      p_lay(layout_for(cfg)), p_data(stream, p_lay.data, p_lay.align, cfg.target_latency_s,
+                                     cfg.max_block_s, cfg.cache_bytes),
+      p_guard_until(now_s() + cfg.guard_s)
 {
-	data_.set_max_latency(cfg.max_latency_s);
-	latency_ = data_.latency_s();
+	p_data.set_max_latency(cfg.max_latency_s);
+	p_latency = p_data.latency_s();
 }
 
 Player::~Player()
 {
 	{
-		std::lock_guard<std::mutex> lk(watch_mu_);
-		watch_stop_ = true;
+		std::lock_guard<std::mutex> lk(p_watch_mu);
+		p_watch_stop = true;
 	}
-	watch_cv_.notify_all();
-	if (watch_.joinable()) watch_.join();
+	p_watch_cv.notify_all();
+	if (p_watch.joinable()) p_watch.join();
 }
 
 std::vector<VirtualFile> Player::make_files()
 {
 	std::vector<VirtualFile> files;
-	for (int i = 0; i < cfg_.files; i++) {
+	for (int i = 0; i < p_cfg.files; i++) {
 		VirtualFile f;
 		char sfn[32];
-		snprintf(sfn, sizeof sfn, "TRACK%02d.%s", i + 1, lay_.ext.c_str());
+		snprintf(sfn, sizeof sfn, "TRACK%02d.%s", i + 1, p_lay.ext.c_str());
 		f.short_name = sfn;
-		f.size = lay_.file;
+		f.size = p_lay.file;
 		f.read = [this, i](uint32_t off, uint8_t* dst, size_t n) { read_file(i, off, dst, n); };
 		f.peek = [this, i](uint32_t off, uint8_t* dst, size_t n) { peek_file(i, off, dst, n); };
 		f.long_name = [this, i] { return long_name(i); };
@@ -57,9 +58,9 @@ std::vector<VirtualFile> Player::make_files()
 
 std::string Player::long_name(int i)
 {
-	std::string ext = lay_.ext == "WAV" ? "wav" : "mp3";
-	if (cfg_.dynamic_names && i == current_) {
-		std::string label = to_latin1(control_.track().display_name(), cfg_.charset);
+	std::string ext = p_lay.ext == "WAV" ? "wav" : "mp3";
+	if (p_cfg.dynamic_names && i == p_current) {
+		std::string label = to_latin1(p_control.track().display_name(), p_cfg.charset);
 		std::string clean;
 		for (unsigned char c : label)
 			clean.push_back((c < 32 || strchr("<>:\"/\\|?*", c)) ? ' ' : c);
@@ -80,90 +81,90 @@ std::string Player::long_name(int i)
 		}
 	}
 	char buf[64];
-	snprintf(buf, sizeof buf, "%s %02d.%s", cfg_.name_prefix.c_str(), i + 1, ext.c_str());
+	snprintf(buf, sizeof buf, "%s %02d.%s", p_cfg.name_prefix.c_str(), i + 1, ext.c_str());
 	return buf;
 }
 
 void Player::event(const std::string& e)
 {
 	LOGI("%s", e.c_str());
-	std::lock_guard<std::mutex> lk(ev_mu_);
-	events_.push_back(e);
-	if (events_.size() > 200) events_.erase(events_.begin());
+	std::lock_guard<std::mutex> lk(p_ev_mu);
+	p_events.push_back(e);
+	if (p_events.size() > 200) p_events.erase(p_events.begin());
 }
 
 std::vector<std::string> Player::events()
 {
-	std::lock_guard<std::mutex> lk(ev_mu_);
-	return events_;
+	std::lock_guard<std::mutex> lk(p_ev_mu);
+	return p_events;
 }
 
 void Player::command(const std::string& c)
 {
 	event("-> phone " + c);
-	control_.command(c);
+	p_control.command(c);
 }
 
 void Player::on_mount()
 {
-	std::lock_guard<std::recursive_mutex> lk(mu_);
-	guard_until_ = now_s() + cfg_.guard_s;
-	autoplay_done_ = false;
-	settled_ = false;
+	std::lock_guard<std::recursive_mutex> lk(p_mu);
+	p_guard_until = now_s() + p_cfg.guard_s;
+	p_autoplay_done = false;
+	p_settled = false;
 	event("mount");
 }
 
 void Player::on_disconnect()
 {
-	std::lock_guard<std::recursive_mutex> lk(mu_);
+	std::lock_guard<std::recursive_mutex> lk(p_mu);
 	event("usb disconnected");
-	if (cfg_.pause_after_s > 0 && control_.connected() && control_.status() == "playing") {
+	if (p_cfg.pause_after_s > 0 && p_control.connected() && p_control.status() == "playing") {
 		command("pause");
-		paused_by_us_ = true;
+		p_paused_by_us = true;
 	}
-	data_.reset();
-	data_.restore_latency();  // the next host may be a radio
+	p_data.reset();
+	p_data.restore_latency();  // the next host may be a radio
 	latency_changed();
-	current_ = -1;
-	settled_ = false;
+	p_current = -1;
+	p_settled = false;
 }
 
 void Player::latency_changed()
 {
-	double l = data_.latency_s();
-	if (l == latency_) return;
-	latency_ = l;
-	control_.set_delay(l * 1000);  // a host's big reads, or back to the target on a new host
+	double l = p_data.latency_s();
+	if (l == p_latency) return;
+	p_latency = l;
+	p_control.set_delay(l * 1000);  // a host's big reads, or back to the target on a new host
 }
 
 TrackInfo Player::tag_info()
 {
 	// A radio reads a file's tags when it opens it, never again: the title of the track the
 	// phone plays would go stale at the next song. The phone's name stays true.
-	if (cfg_.tags == "track") return control_.track();
+	if (p_cfg.tags == "track") return p_control.track();
 	TrackInfo t;
-	t.title = control_.phone_name();
+	t.title = p_control.phone_name();
 	if (t.title.empty()) t.title = "Bluetooth";
 	return t;
 }
 
 Bytes Player::header(const TrackInfo& t) const
 {
-	if (cfg_.format == "wav")
-		return wav_header(lay_.data, cfg_.rate, cfg_.channels, 16, lay_.header,
-		                  cfg_.wav_info ? &t : nullptr, cfg_.charset);
-	return id3v2_tag(t, lay_.header, cfg_.charset);
+	if (p_cfg.format == "wav")
+		return wav_header(p_lay.data, p_cfg.rate, p_cfg.channels, 16, p_lay.header,
+		                  p_cfg.wav_info ? &t : nullptr, p_cfg.charset);
+	return id3v2_tag(t, p_lay.header, p_cfg.charset);
 }
 
 void Player::read_file(int i, uint32_t offset, uint8_t* dst, size_t n)
 {
-	std::lock_guard<std::recursive_mutex> lk(mu_);
+	std::lock_guard<std::recursive_mutex> lk(p_mu);
 	double now = now_s();
 	uint64_t end = uint64_t(offset) + n;
-	uint64_t hdr_end = lay_.header, data_end = hdr_end + lay_.data;
+	uint64_t hdr_end = p_lay.header, data_end = hdr_end + p_lay.data;
 	bool touches_header = offset < hdr_end;
 	bool touches_data = offset < data_end && end > hdr_end;
-	bool guard = now < guard_until_;
+	bool guard = now < p_guard_until;
 
 	// Radios read the last sector of a file when they open it (ID3v1, the duration). That is a
 	// probe, not a resume: serve silence there and leave the live position alone.
@@ -172,43 +173,44 @@ void Player::read_file(int i, uint32_t offset, uint8_t* dst, size_t n)
 	const uint64_t tail_zone = 1u << 20, tail_run = 64u << 10;
 	bool near_tail = touches_data && offset + tail_zone >= data_end;
 	if (near_tail) {
-		tail_bytes_ = (i == tail_file_ && offset == tail_next_) ? tail_bytes_ + n : n;
-		tail_file_ = i;
-		tail_next_ = end;
-		if (tail_bytes_ > tail_run) near_tail = false;
+		p_tail_bytes = (i == p_tail_file && offset == p_tail_next) ? p_tail_bytes + n : n;
+		p_tail_file = i;
+		p_tail_next = end;
+		if (p_tail_bytes > tail_run) near_tail = false;
 	}
 	auto is_probe = [&] {
-		return near_tail && i == current_ &&
-		       uint64_t(data_.filled_to()) + 2 * tail_zone < lay_.data;
+		return near_tail && i == p_current &&
+		       uint64_t(p_data.filled_to()) + 2 * tail_zone < p_lay.data;
 	};
 
 	// The log file's trace of what the radio does: where each run of reads starts.
-	double gap = last_read_ > 0 ? now - last_read_ : 0;
-	if (i != trace_file_ || offset != trace_next_) {
+	double gap = p_last_read > 0 ? now - p_last_read : 0;
+	if (i != p_trace_file || offset != p_trace_next) {
 		LOGI("read: file %d at %u +%zu%s", i + 1, offset, n,
 		     gap >= 1 ? (" after " + std::to_string(int(gap)) + " s").c_str() : "");
 	} else if (gap >= 0.3) {
 		// The trace: the radio paused and carried on where it was (a track picker, a menu).
 		LOGT("read: file %d at %u +%zu on, after %.2f s", i + 1, offset, n, gap);
 	}
-	trace_file_ = i;
-	trace_next_ = end;
-	last_read_ = now;
+	p_trace_file = i;
+	p_trace_next = end;
+	p_last_read = now;
 	if (g_trace) {
-		if (reads_.size() < 512)
-			reads_.push_back({now, i, offset, uint32_t(n)});
+		if (p_reads.size() < 512)
+			p_reads.push_back({now, i, offset, uint32_t(n)});
 		else
-			reads_[reads_at_++ % reads_.size()] = {now, i, offset, uint32_t(n)};
+			p_reads[p_reads_at++ % p_reads.size()] = {now, i, offset, uint32_t(n)};
 	}
 
 	// The radio was away (source switch, pause) when it has not read for as long as makes us
 	// pause the phone. Coming back it opens the file again (tag, first frames) and carries on
 	// where it was, or at the start: that is not the user restarting the track.
-	bool away = paused_by_us_ || (last_data_read_ > 0 && now - last_data_read_ > pause_threshold());
+	bool away =
+	    p_paused_by_us || (p_last_data_read > 0 && now - p_last_data_read > pause_threshold());
 	bool near_start = touches_data && (offset < hdr_end || offset - hdr_end < 65536);
 
 	bool scan_read = false;
-	if (!settled_) {
+	if (!p_settled) {
 		// After a mount (or a USB reconnect) the radio scans tags and picks a file to resume:
 		// follow it silently until it has really been playing one file for a while. While it
 		// scans it also decodes the first frames of each file (format, bitrate): such a read is
@@ -216,35 +218,35 @@ void Player::read_file(int i, uint32_t offset, uint8_t* dst, size_t n)
 		// (4 s for 128 KiB of 256 kbps MP3, for every file). Only a read that carries on where
 		// the last one of the same file ended is playback: that file goes live from there.
 		if (touches_data) {
-			bool continues = i == scan_file_ && offset == scan_next_;
-			scan_file_ = i;
-			scan_next_ = end;
+			bool continues = i == p_scan_file && offset == p_scan_next;
+			p_scan_file = i;
+			p_scan_next = end;
 			if (!continues)
 				scan_read = true;
-			else if (i != current_ && !near_tail)
+			else if (i != p_current && !near_tail)
 				switch_to(i);
 		}
-	} else if (i != current_) {
+	} else if (i != p_current) {
 		on_other_file(i);
-	} else if (restart_pending_ && touches_data) {
+	} else if (p_restart_pending && touches_data) {
 		// The read after one at the file's start: carrying on from there is a restart; a jump
 		// is the radio seeking to where it was after reading the first frames (a resume).
 		// Back from another source, a radio that starts the file over gets live audio from
 		// there (not what it played minutes ago), and the phone carries on.
-		restart_pending_ = false;
-		if (offset == restart_next_) {
-			if (restart_away_)
+		p_restart_pending = false;
+		if (offset == p_restart_next) {
+			if (p_restart_away)
 				switch_to(i);
 			else
 				maybe_restart(i);
 		}
 	} else if (near_start &&
-	           data_.filled_to() > (offset < hdr_end ? 0 : offset - hdr_end) + 65536) {
+	           p_data.filled_to() > (offset < hdr_end ? 0 : offset - hdr_end) + 65536) {
 		// Back at the start of the file it is playing: a restart, or a look at the first frames
 		// before a seek. The next read tells; this one is silence either way.
-		restart_pending_ = true;
-		restart_away_ = away;
-		restart_next_ = end;
+		p_restart_pending = true;
+		p_restart_away = away;
+		p_restart_next = end;
 		scan_read = true;
 	}
 	bool probe = is_probe() || scan_read;
@@ -252,39 +254,39 @@ void Player::read_file(int i, uint32_t offset, uint8_t* dst, size_t n)
 	memset(dst, 0, n);
 	if (touches_header) {
 		// One snapshot per open: a header read in several pieces must stay consistent.
-		if (offset == 0 || !header_snap_.count(i)) header_snap_[i] = tag_info();
-		Bytes h = header(header_snap_[i]);
+		if (offset == 0 || !p_header_snap.count(i)) p_header_snap[i] = tag_info();
+		Bytes h = header(p_header_snap[i]);
 		memcpy(dst, h.data() + offset, std::min<uint64_t>(end, hdr_end) - offset);
 	}
 	if (touches_data) {
 		uint64_t a = std::max<uint64_t>(offset, hdr_end), b = std::min(end, data_end);
 		uint8_t* p = dst + (a - offset);
-		if (i == current_ && !probe) {
-			data_.read(uint32_t(a - hdr_end), p, b - a);
+		if (i == p_current && !probe) {
+			p_data.read(uint32_t(a - hdr_end), p, b - a);
 			latency_changed();
 			note_data_read(now);
-			if (!radio_live_ && data_.got_live_audio()) {
+			if (!p_radio_live && p_data.got_live_audio()) {
 				// The radio streams the new file: fade the phone in once it has switched too.
-				radio_live_ = true;
-				double done = phone_done_at_;
+				p_radio_live = true;
+				double done = p_phone_done_at;
 				if (done > 0)
-					stream_.unmute_phone(std::max(0.0, done + cfg_.skip_mute_s - now_s()));
+					p_stream.unmute_phone(std::max(0.0, done + p_cfg.skip_mute_s - now_s()));
 				LOGT("radio streams file %d%s", i + 1, done > 0 ? ": phone back in" : "");
 			}
 			// Two seconds of audio: more than a tag scan or a host's filesystem probe reads.
-			uint64_t settle = std::max<uint64_t>(256 * 1024, 2ull * enc_.byte_rate());
-			if (!settled_ && !guard && data_.filled_to() >= settle) {
-				settled_ = true;
+			uint64_t settle = std::max<uint64_t>(256 * 1024, 2ull * p_enc.byte_rate());
+			if (!p_settled && !guard && p_data.filled_to() >= settle) {
+				p_settled = true;
 				event("radio plays file " + std::to_string(i + 1));
 			}
-		} else if (cfg_.format == "mp3") {
+		} else if (p_cfg.format == "mp3") {
 			// A file that is not playing (tag scan): valid silence.
-			const Bytes& f = enc_.silence_chunk();
+			const Bytes& f = p_enc.silence_chunk();
 			for (uint64_t k = 0; k < b - a; k++) p[k] = f[(a - hdr_end + k) % f.size()];
 		}
 	}
-	if (end > data_end && lay_.tail) {
-		Bytes tail = id3v1_tag(header_snap_.count(i) ? header_snap_[i] : tag_info());
+	if (end > data_end && p_lay.tail) {
+		Bytes tail = id3v1_tag(p_header_snap.count(i) ? p_header_snap[i] : tag_info());
 		uint64_t a = std::max<uint64_t>(offset, data_end);
 		memcpy(dst + (a - offset), tail.data() + (a - data_end), end - a);
 	}
@@ -294,20 +296,20 @@ void Player::peek_file(int i, uint32_t offset, uint8_t* dst, size_t n)
 {
 	// What a file holds where the radio did not mean to read (the end of a read that started in
 	// the file before): the tag, silence, the ID3v1 tag. Not a sign of anything it does.
-	std::lock_guard<std::recursive_mutex> lk(mu_);
-	uint64_t end = uint64_t(offset) + n, hdr_end = lay_.header, data_end = hdr_end + lay_.data;
-	TrackInfo t = header_snap_.count(i) ? header_snap_[i] : tag_info();
+	std::lock_guard<std::recursive_mutex> lk(p_mu);
+	uint64_t end = uint64_t(offset) + n, hdr_end = p_lay.header, data_end = hdr_end + p_lay.data;
+	TrackInfo t = p_header_snap.count(i) ? p_header_snap[i] : tag_info();
 	memset(dst, 0, n);
 	if (offset < hdr_end) {
 		Bytes h = header(t);
 		memcpy(dst, h.data() + offset, std::min<uint64_t>(end, hdr_end) - offset);
 	}
-	if (offset < data_end && end > hdr_end && cfg_.format == "mp3") {
+	if (offset < data_end && end > hdr_end && p_cfg.format == "mp3") {
 		uint64_t a = std::max<uint64_t>(offset, hdr_end), b = std::min(end, data_end);
-		const Bytes& f = enc_.silence_chunk();
+		const Bytes& f = p_enc.silence_chunk();
 		for (uint64_t k = a; k < b; k++) dst[k - offset] = f[(k - hdr_end) % f.size()];
 	}
-	if (end > data_end && lay_.tail) {
+	if (end > data_end && p_lay.tail) {
 		Bytes tail = id3v1_tag(t);
 		uint64_t a = std::max<uint64_t>(offset, data_end);
 		memcpy(dst + (a - offset), tail.data() + (a - data_end), end - a);
@@ -316,10 +318,10 @@ void Player::peek_file(int i, uint32_t offset, uint8_t* dst, size_t n)
 
 void Player::on_other_file(int i)
 {
-	int cur = current_;
-	int n = cfg_.files;
-	uint64_t near_end = std::max<uint64_t>(4u << 20, 10ull * enc_.byte_rate());
-	if (i == (cur + 1) % n && data_.filled_to() + near_end >= lay_.data) {
+	int cur = p_current;
+	int n = p_cfg.files;
+	uint64_t near_end = std::max<uint64_t>(4u << 20, 10ull * p_enc.byte_rate());
+	if (i == (cur + 1) % n && p_data.filled_to() + near_end >= p_lay.data) {
 		event("radio reached the end of file " + std::to_string(cur + 1));
 		switch_to(i, true);
 		return;
@@ -338,27 +340,27 @@ void Player::on_other_file(int i)
 
 void Player::maybe_restart(int i)
 {
-	if (!cfg_.restart_is_previous) return;
+	if (!p_cfg.restart_is_previous) return;
 	// What the radio has read of the file: what it played, plus its buffer.
-	double played = double(data_.filled_to()) / enc_.byte_rate();
+	double played = double(p_data.filled_to()) / p_enc.byte_rate();
 	double now = now_s();
 	char buf[160];
-	if (played < cfg_.restart_threshold_s) {
+	if (played < p_cfg.restart_threshold_s) {
 		snprintf(buf, sizeof buf,
 		         "radio read file %d from its start after %.1f s: not a restart "
 		         "(restart_threshold_s %.1f)",
-		         i + 1, played, cfg_.restart_threshold_s);
+		         i + 1, played, p_cfg.restart_threshold_s);
 		event(buf);
 		return;
 	}
 	switch_to(i);
-	paused_by_us_ = false;  // the title stays: nothing to wait for
+	p_paused_by_us = false;  // the title stays: nothing to wait for
 	// A radio restarts its file once per press; the phone restarts its song on Previous only
 	// when it is a few seconds in, and goes back a song before that. When the phone's song has
 	// only just started over (a Next/Previous/restart a moment ago: a radio that showed a track
 	// picker and then opened the file again), both are at the start already.
-	double since = now - phone_switched_at_;
-	if (since < cfg_.phone_restart_s) {
+	double since = now - p_phone_switched_at;
+	if (since < p_cfg.phone_restart_s) {
 		snprintf(buf, sizeof buf,
 		         "radio restarted file %d after %.1f s; the phone's song started "
 		         "%.1f s ago: nothing to send",
@@ -369,37 +371,37 @@ void Player::maybe_restart(int i)
 	snprintf(buf, sizeof buf, "radio restarted file %d after %.1f s", i + 1, played);
 	event(buf);
 	trace_reads("restart");
-	if (!control_.connected()) return;
+	if (!p_control.connected()) return;
 	command("restart");
 	mute_until_switched(1, true);
 }
 
 double Player::pause_threshold() const
 {
-	return std::max(cfg_.pause_after_s > 0 ? cfg_.pause_after_s : 5.0, 3.0 * interval_);
+	return std::max(p_cfg.pause_after_s > 0 ? p_cfg.pause_after_s : 5.0, 3.0 * p_interval);
 }
 
 void Player::switch_to(int i, bool continuous)
 {
-	current_ = i;
-	restart_pending_ = false;
-	data_.reset(continuous);
-	header_snap_.erase(i);
+	p_current = i;
+	p_restart_pending = false;
+	p_data.reset(continuous);
+	p_header_snap.erase(i);
 }
 
 void Player::send_and_wait(const std::vector<std::string>& cmds)
 {
-	paused_by_us_ = false;
-	if (!control_.connected() || cmds.empty()) return;
-	uint64_t v = control_.track_version();
+	p_paused_by_us = false;
+	if (!p_control.connected() || cmds.empty()) return;
+	uint64_t v = p_control.track_version();
 	for (auto& c : cmds) command(c);
 	mute_until_switched(cmds.size());  // after: the watcher must find them queued
 	// Only tags that follow the track need the phone's new one before the header is answered.
-	if (cfg_.metadata_wait_s > 0 && cfg_.tags == "track") {
+	if (p_cfg.metadata_wait_s > 0 && p_cfg.tags == "track") {
 		// The phone carries them out one after another, each in a few tenths of a second.
 		double t0 = now_s();
-		double wait = cfg_.metadata_wait_s + 0.5 * (double(cmds.size()) - 1);
-		bool changed = control_.wait_track_change(v, wait);
+		double wait = p_cfg.metadata_wait_s + 0.5 * (double(cmds.size()) - 1);
+		bool changed = p_control.wait_track_change(v, wait);
 		char buf[96];
 		snprintf(buf, sizeof buf, "metadata %s after %.2f s", changed ? "updated" : "unchanged",
 		         now_s() - t0);
@@ -411,12 +413,12 @@ void Player::trace_reads(const char* why)
 {
 	// The reads of the last 15 s as runs (sequential, no pause over 0.25 s): how the radio
 	// played, paused (a track picker) and opened files around a button press.
-	if (!g_trace || reads_.empty()) return;
+	if (!g_trace || p_reads.empty()) return;
 	double now = now_s();
-	size_t n = reads_.size(), first = reads_.size() < 512 ? 0 : reads_at_ % n;
+	size_t n = p_reads.size(), first = p_reads.size() < 512 ? 0 : p_reads_at % n;
 	std::vector<ReadRec> r;
 	for (size_t k = 0; k < n; k++) {
-		const ReadRec& x = reads_[(first + k) % n];
+		const ReadRec& x = p_reads[(first + k) % n];
 		if (now - x.t <= 15) r.push_back(x);
 	}
 	LOGT("reads before the %s (seconds before it):", why);
@@ -444,51 +446,51 @@ void Player::mute_until_switched(size_t steps, bool restart)
 	// deadline): the phone has restarted the song within a few tenths of a second, and the
 	// radio, which saw the restart only when it was streaming the file again, should not wait.
 	double max = restart ? 0.4 : std::min(10.0, 1.5 * double(steps + 1) + 1);
-	phone_switched_at_ = now_s();
-	if (cfg_.skip_mute) {
-		phone_done_at_ = 0;
-		radio_live_ = false;
-		data_.next_start_silent();
+	p_phone_switched_at = now_s();
+	if (p_cfg.skip_mute) {
+		p_phone_done_at = 0;
+		p_radio_live = false;
+		p_data.next_start_silent();
 
 		// Longer than the wait for the phone: the radio may take seconds to stream the file
 		// (the Sony: 3 s from opening it). Without either, the phone comes back after that.
-		stream_.mute_phone(max + 10);
+		p_stream.mute_phone(max + 10);
 		LOGT("phone muted until it has switched and the radio streams");
 	}
-	std::lock_guard<std::mutex> lk(watch_mu_);
-	watch_gen_++;
-	watch_t0_ = now_s();
-	watch_max_ = max;
-	watch_restart_ = restart;
-	if (!watch_.joinable()) watch_ = std::thread([this] { watch_loop(); });
-	watch_cv_.notify_all();
+	std::lock_guard<std::mutex> lk(p_watch_mu);
+	p_watch_gen++;
+	p_watch_t0 = now_s();
+	p_watch_max = max;
+	p_watch_restart = restart;
+	if (!p_watch.joinable()) p_watch = std::thread([this] { watch_loop(); });
+	p_watch_cv.notify_all();
 }
 
 void Player::watch_loop()
 {
-	std::unique_lock<std::mutex> lk(watch_mu_);
+	std::unique_lock<std::mutex> lk(p_watch_mu);
 	while (true) {
-		watch_cv_.wait(lk, [&] { return watch_stop_ || watch_gen_ != watched_gen_; });
-		if (watch_stop_) return;
-		uint64_t gen = watch_gen_;
-		double t0 = watch_t0_, deadline = t0 + watch_max_;
-		bool restart = watch_restart_;
+		p_watch_cv.wait(lk, [&] { return p_watch_stop || p_watch_gen != p_watched_gen; });
+		if (p_watch_stop) return;
+		uint64_t gen = p_watch_gen;
+		double t0 = p_watch_t0, deadline = t0 + p_watch_max;
+		bool restart = p_watch_restart;
 		lk.unlock();
 		bool done = false;
 		while (!done && now_s() < deadline) {
-			done = control_.wait_commands_done(std::min(0.1, deadline - now_s()));
-			std::lock_guard<std::mutex> g(watch_mu_);
-			if (watch_stop_ || watch_gen_ != gen) break;
+			done = p_control.wait_commands_done(std::min(0.1, deadline - now_s()));
+			std::lock_guard<std::mutex> g(p_watch_mu);
+			if (p_watch_stop || p_watch_gen != gen) break;
 		}
 		lk.lock();
-		if (watch_stop_) return;
-		if (watch_gen_ != gen) continue;  // more commands since: wait for those as well
-		watched_gen_ = gen;
+		if (p_watch_stop) return;
+		if (p_watch_gen != gen) continue;  // more commands since: wait for those as well
+		p_watched_gen = gen;
 		lk.unlock();
 		double now = now_s();
-		phone_switched_at_ = now;
-		phone_done_at_ = now;
-		if (cfg_.skip_mute && radio_live_) stream_.unmute_phone(cfg_.skip_mute_s);
+		p_phone_switched_at = now;
+		p_phone_done_at = now;
+		if (p_cfg.skip_mute && p_radio_live) p_stream.unmute_phone(p_cfg.skip_mute_s);
 		char buf[96];
 		snprintf(buf, sizeof buf,
 		         done      ? "phone switched after %.2f s"
@@ -502,42 +504,42 @@ void Player::watch_loop()
 
 void Player::note_data_read(double now)
 {
-	if (last_data_read_ > 0) {
-		double gap = now - last_data_read_;
-		if (gap < 60) interval_ = interval_ == 0 ? gap : 0.8 * interval_ + 0.2 * gap;
+	if (p_last_data_read > 0) {
+		double gap = now - p_last_data_read;
+		if (gap < 60) p_interval = p_interval == 0 ? gap : 0.8 * p_interval + 0.2 * gap;
 	}
-	last_data_read_ = now;
+	p_last_data_read = now;
 
 	// Autoplay once per mount, and again whenever the phone (re)connects while the radio
 	// reads: Android pauses when its Bluetooth link drops (power cut, out of range), and
 	// nothing else would start it again.
-	bool conn = control_.connected();
-	if (conn && !phone_connected_) autoplay_done_ = false;
-	phone_connected_ = conn;
-	if (paused_by_us_) {
-		paused_by_us_ = false;
+	bool conn = p_control.connected();
+	if (conn && !p_phone_connected) p_autoplay_done = false;
+	p_phone_connected = conn;
+	if (p_paused_by_us) {
+		p_paused_by_us = false;
 		command("play");
-	} else if (cfg_.autoplay && !autoplay_done_ && conn) {
-		std::string s = control_.status();
+	} else if (p_cfg.autoplay && !p_autoplay_done && conn) {
+		std::string s = p_control.status();
 		if (s.empty() || s == "unknown") return;  // the player has not said yet
-		autoplay_done_ = true;
+		p_autoplay_done = true;
 		if (s == "paused" || s == "stopped") command("play");
 	}
 }
 
 void Player::tick()
 {
-	if (cfg_.pause_after_s <= 0) return;
-	std::unique_lock<std::recursive_mutex> lk(mu_, std::try_to_lock);
+	if (p_cfg.pause_after_s <= 0) return;
+	std::unique_lock<std::recursive_mutex> lk(p_mu, std::try_to_lock);
 	if (!lk.owns_lock()) return;  // a read is in progress: the radio is not paused
 	double now = now_s();
 	double threshold = pause_threshold();
-	if (last_data_read_ > 0 && !paused_by_us_ && now - last_data_read_ > threshold &&
-	    control_.connected() && control_.status() == "playing") {
+	if (p_last_data_read > 0 && !p_paused_by_us && now - p_last_data_read > threshold &&
+	    p_control.connected() && p_control.status() == "playing") {
 		char buf[80];
-		snprintf(buf, sizeof buf, "radio stopped reading %.1f s ago", now - last_data_read_);
+		snprintf(buf, sizeof buf, "radio stopped reading %.1f s ago", now - p_last_data_read);
 		event(buf);
 		command("pause");
-		paused_by_us_ = true;
+		p_paused_by_us = true;
 	}
 }

@@ -32,19 +32,19 @@ public:
 	void reset();
 	void update(uint64_t position, double arrival);
 	/// + = the phone's clock runs fast
-	double ppm() const { return ppm_; }
-	bool valid() const { return valid_; }
+	double ppm() const { return p_ppm; }
+	bool valid() const { return p_valid; }
 
 private:
 	void fit();
-	double rate_, window_, span_;
-	bool in_window_ = false;
-	double win_start_ = 0, win_min_ = 0, win_t_ = 0, t0_ = 0;
+	double p_rate, p_window, p_span;
+	bool p_in_window = false;
+	double p_win_start = 0, p_win_min = 0, p_win_t = 0, p_t0 = 0;
 	/// (time, minimum delay) per window
-	std::deque<std::pair<double, double>> mins_;
-	/// error_ppm_: the last fit's standard error
-	double ppm_ = 0, error_ppm_ = 0;
-	bool valid_ = false;
+	std::deque<std::pair<double, double>> p_mins;
+	/// p_error_ppm: the last fit's standard error
+	double p_ppm = 0, p_error_ppm = 0;
+	bool p_valid = false;
 };
 
 /// What the radio's reads did since the last look, collected by the chunk queue (stream.h).
@@ -75,18 +75,18 @@ public:
 	explicit RadioClock(double period_s = 300, double max_ppm = 1000);
 	void update(double now, const ReadStats& s, double byte_rate);
 	/// the radio's clock, + = fast
-	double ppm() const { return integral_; }
+	double ppm() const { return p_integral; }
 	/// to apply: the clock + the backlog's error
 	double trim_ppm() const;
-	bool locked() const { return settle_ == 0; }
+	bool locked() const { return p_settle == 0; }
 
 private:
 	void end_window(double byte_rate);
-	double window_, kp_, ki_, max_;
-	double win_start_ = -1;
-	ReadStats win_;
-	int settle_;
-	double setpoint_ = 0, error_ = 0, integral_ = 0;
+	double p_window, p_kp, p_ki, p_max;
+	double p_win_start = -1;
+	ReadStats p_win;
+	int p_settle;
+	double p_setpoint = 0, p_error = 0, p_integral = 0;
 };
 
 /// An asynchronous sample rate converter for ratios close to 1: a windowed-sinc FIR, polyphase
@@ -107,13 +107,13 @@ public:
 private:
 	static constexpr int kTaps = 48;
 	static constexpr int kPhases = 256;
-	int ch_;
+	int p_ch;
 	/// kPhases rows of kTaps
-	std::vector<float> coef_;
+	std::vector<float> p_coef;
 	/// each row's step to the next phase's
-	std::vector<float> delta_;
+	std::vector<float> p_delta;
 	/// input frames still needed, interleaved
-	std::vector<float> hist_;
+	std::vector<float> p_hist;
 	/// input frame of the next output frame
-	double pos_;
+	double p_pos;
 };

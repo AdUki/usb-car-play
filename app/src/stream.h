@@ -29,21 +29,22 @@ public:
 	/// Drops the oldest chunks until at most max_bytes remain; returns the bytes dropped.
 	size_t trim_to(size_t max_bytes);
 	void clear();
+
 	/// The backlog stepped without a trim (silence put in front of it): see
 	/// ReadStats::discontinuities.
 	void mark_discontinuity();
-	uint64_t dropped_total() const { return dropped_; }
+	uint64_t dropped_total() const { return p_dropped; }
 	/// What the consumer (the radio) did since the last call: drift.h's RadioClock reads it.
 	ReadStats take_read_stats();
 
 private:
-	mutable std::mutex mu_;
-	std::condition_variable cv_;
-	std::deque<Bytes> q_;
-	size_t bytes_ = 0;
-	uint64_t dropped_ = 0;
-	ReadStats stats_;
-	double last_put_ = 0;
+	mutable std::mutex p_mu;
+	std::condition_variable p_cv;
+	std::deque<Bytes> p_q;
+	size_t p_bytes = 0;
+	uint64_t p_dropped = 0;
+	ReadStats p_stats;
+	double p_last_put = 0;
 };
 
 /// PCM in, chunks into the queue. LiveStream feeds it; LiveFileData reads what it says about the
@@ -51,7 +52,7 @@ private:
 class Encoder
 {
 public:
-	explicit Encoder(ChunkQueue& q) : queue_(q) {}
+	explicit Encoder(ChunkQueue& q) : p_queue(q) {}
 	virtual ~Encoder() = default;
 	/// s16le interleaved
 	virtual void feed(const uint8_t* pcm, size_t n) = 0;
@@ -61,11 +62,11 @@ public:
 	/// A chunk may be cut at multiples of this (one PCM frame); 0: only whole chunks (MP3 frames).
 	virtual size_t cut_bytes() const { return 0; }
 	/// encoded bytes per second
-	uint32_t byte_rate() const { return byte_rate_; }
+	uint32_t byte_rate() const { return p_byte_rate; }
 
 protected:
-	ChunkQueue& queue_;
-	uint32_t byte_rate_ = 0;
+	ChunkQueue& p_queue;
+	uint32_t p_byte_rate = 0;
 };
 
 /// Plain PCM, in chunks of 1152 frames.
@@ -74,14 +75,14 @@ class WavEncoder : public Encoder
 public:
 	WavEncoder(ChunkQueue& q, int rate, int channels);
 	void feed(const uint8_t* pcm, size_t n) override;
-	void discard_buffered() override { stale_pending_ = true; }
-	const Bytes& silence_chunk() const override { return silence_; }
-	size_t cut_bytes() const override { return frame_bytes_; }
+	void discard_buffered() override { p_stale_pending = true; }
+	const Bytes& silence_chunk() const override { return p_silence; }
+	size_t cut_bytes() const override { return p_frame_bytes; }
 
 private:
-	size_t chunk_bytes_, frame_bytes_;
-	Bytes pending_, silence_;
-	std::atomic<bool> stale_pending_{false};
+	size_t p_chunk_bytes, p_frame_bytes;
+	Bytes p_pending, p_silence;
+	std::atomic<bool> p_stale_pending{false};
 };
 
 /// CBR MP3 through an external encoder process (lame by default). Expensive on a Zero W: WAV
@@ -93,20 +94,20 @@ public:
 	~Mp3Encoder() override;
 	void feed(const uint8_t* pcm, size_t n) override;
 	void discard_buffered() override;
-	const Bytes& silence_chunk() const override { return silence_; }
+	const Bytes& silence_chunk() const override { return p_silence; }
 
 private:
 	void reader();
-	int in_fd_ = -1, out_fd_ = -1, pid_ = -1;
-	int channels_;
-	std::thread reader_;
-	Bytes silence_, noisy_;
-	uint32_t noise_ = 0x12345678;
+	int p_in_fd = -1, p_out_fd = -1, p_pid = -1;
+	int p_channels;
+	std::thread p_reader;
+	Bytes p_silence, p_noisy;
+	uint32_t p_noise = 0x12345678;
 
 	/// Frames go in and out of lame one for one (1152 samples, no tag frame): the ones that
 	/// carry samples fed before discard_buffered() come out as silence.
-	std::atomic<uint64_t> fed_samples_{0}, stale_frames_{0};
-	uint64_t out_frames_ = 0;
+	std::atomic<uint64_t> p_fed_samples{0}, p_stale_frames{0};
+	uint64_t p_out_frames = 0;
 };
 
 /// How the stream and its two clocks are doing (the log's heartbeat, tests).
@@ -178,41 +179,41 @@ public:
 	bool phone_muted() const;
 
 	StreamStatus status() const;
-	ChunkQueue& queue() { return queue_; }
-	Encoder& encoder() { return *encoder_; }
+	ChunkQueue& queue() { return p_queue; }
+	Encoder& encoder() { return *p_encoder; }
 
 private:
 	void clock_loop();
 	/// through the mute gate
 	void feed_phone(const uint8_t* pcm, size_t n);
-	/// radio samples per Pi-clock sample, with mu_ held
+	/// radio samples per Pi-clock sample, with p_mu held
 	double out_scale() const;
-	ChunkQueue queue_;
-	std::unique_ptr<Encoder> encoder_;
-	mutable std::mutex mu_;
-	int rate_, channels_, frame_bytes_;
-	DriftOptions drift_;
-	double idle_fill_;
-	double last_input_ = 0;
-	bool source_active_ = false;
-	Bytes partial_;
-	PtsClock pts_;
-	RadioClock radio_;
-	Resampler resampler_;
-	std::vector<int16_t> resampled_;
-	bool stop_ = false;
-	std::condition_variable stop_cv_;
-	std::thread thread_;
+	ChunkQueue p_queue;
+	std::unique_ptr<Encoder> p_encoder;
+	mutable std::mutex p_mu;
+	int p_rate, p_channels, p_frame_bytes;
+	DriftOptions p_drift;
+	double p_idle_fill;
+	double p_last_input = 0;
+	bool p_source_active = false;
+	Bytes p_partial;
+	PtsClock p_pts;
+	RadioClock p_radio;
+	Resampler p_resampler;
+	std::vector<int16_t> p_resampled;
+	bool p_stop = false;
+	std::condition_variable p_stop_cv;
+	std::thread p_thread;
 
 	/// @name The mute gate (its own lock: the Player sets it while the stream works)
 	/// @{
-	mutable std::mutex gate_mu_;
-	bool muted_ = false;
-	double mute_until_ = 0;
+	mutable std::mutex p_gate_mu;
+	bool p_muted = false;
+	double p_mute_until = 0;
 	/// samples into the fade-in; -1: none
-	int fade_ = -1;
+	int p_fade = -1;
 	/// the fade-in: 30 ms at 44.1 kHz
-	int fade_samples_;
-	Bytes gated_;
+	int p_fade_samples;
+	Bytes p_gated;
 	/// @}
 };

@@ -259,7 +259,7 @@ int main(int argc, char** argv)
 	}
 	signal(SIGINT, [](int) { quit = 1; });
 	signal(SIGTERM, [](int) { quit = 1; });
-	std::string adapter = "/org/bluez/" + hci, dev = adapter + "/dev_" + addr;
+	std::string adapter = "/org/bluez/" + hci, dev = adapter + "/p_dev" + addr;
 	for (char& c : dev)
 		if (c == ':') c = '_';
 

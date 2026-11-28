@@ -52,13 +52,13 @@ public:
 	/// without delay reporting.
 	void set_delay(double ms);
 
-	bool streaming() const { return streaming_; }
-	uint64_t packets_lost() const { return lost_; }
+	bool streaming() const { return p_streaming; }
+	uint64_t packets_lost() const { return p_lost; }
 
 	/// Reads the media packets from fd until it closes and feeds the decoded PCM to the stream.
 	/// acquired() runs it on its own thread; tests call it directly with a socketpair.
 	void reader(int fd, uint16_t mtu, Codec codec, Bytes config);
-	void set_volume(int v) { volume_ = v; }
+	void set_volume(int v) { p_volume = v; }
 
 private:
 	/// the sd-bus callbacks (a2dp.cpp)
@@ -93,20 +93,20 @@ private:
 	void report_delay(sd_bus* bus, const std::string& path, uint16_t delay);
 	void stop_reader();
 
-	LiveStream& stream_;
-	bool apply_volume_;
-	int rt_prio_;
+	LiveStream& p_stream;
+	bool p_apply_volume;
+	int p_rt_prio;
 	/// in 1/10 ms, as AVDTP has it
-	uint16_t delay_;
+	uint16_t p_delay;
 	/// set_delay()'s, until applied
-	std::atomic<int> want_delay_{-1};
-	std::vector<std::unique_ptr<Endpoint>> endpoints_;
-	std::mutex mu_;
-	std::map<std::string, Transport> transports_;
-	std::string reading_path_;
-	std::thread reader_;
-	std::atomic<bool> stop_{false}, streaming_{false};
-	std::atomic<int> volume_{127};
-	std::atomic<uint64_t> lost_{0};
-	bool registered_ = false;
+	std::atomic<int> p_want_delay{-1};
+	std::vector<std::unique_ptr<Endpoint>> p_endpoints;
+	std::mutex p_mu;
+	std::map<std::string, Transport> p_transports;
+	std::string p_reading_path;
+	std::thread p_reader;
+	std::atomic<bool> p_stop{false}, p_streaming{false};
+	std::atomic<int> p_volume{127};
+	std::atomic<uint64_t> p_lost{0};
+	bool p_registered = false;
 };

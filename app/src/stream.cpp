@@ -14,98 +14,98 @@
 void ChunkQueue::put(Bytes chunk)
 {
 	{
-		std::lock_guard<std::mutex> lk(mu_);
-		last_put_ = now_s();
-		bytes_ += chunk.size();
-		q_.push_back(std::move(chunk));
+		std::lock_guard<std::mutex> lk(p_mu);
+		p_last_put = now_s();
+		p_bytes += chunk.size();
+		p_q.push_back(std::move(chunk));
 	}
-	cv_.notify_all();
+	p_cv.notify_all();
 }
 
 bool ChunkQueue::get(Bytes& out, double timeout_s)
 {
-	std::unique_lock<std::mutex> lk(mu_);
-	if (q_.empty()) stats_.waits++;
-	if (!cv_.wait_for(lk, std::chrono::duration<double>(timeout_s), [&] { return !q_.empty(); }))
+	std::unique_lock<std::mutex> lk(p_mu);
+	if (p_q.empty()) p_stats.waits++;
+	if (!p_cv.wait_for(lk, std::chrono::duration<double>(timeout_s), [&] { return !p_q.empty(); }))
 		return false;
-	out = std::move(q_.front());
-	q_.pop_front();
-	bytes_ -= out.size();
-	stats_.gets++;
-	stats_.backlog_sum += bytes_;
-	stats_.since_put_sum += std::min(now_s() - last_put_, 0.1);
+	out = std::move(p_q.front());
+	p_q.pop_front();
+	p_bytes -= out.size();
+	p_stats.gets++;
+	p_stats.backlog_sum += p_bytes;
+	p_stats.since_put_sum += std::min(now_s() - p_last_put, 0.1);
 	return true;
 }
 
 ReadStats ChunkQueue::take_read_stats()
 {
-	std::lock_guard<std::mutex> lk(mu_);
-	ReadStats s = stats_;
-	stats_ = {};
+	std::lock_guard<std::mutex> lk(p_mu);
+	ReadStats s = p_stats;
+	p_stats = {};
 	return s;
 }
 
 size_t ChunkQueue::backlog() const
 {
-	std::lock_guard<std::mutex> lk(mu_);
-	return bytes_;
+	std::lock_guard<std::mutex> lk(p_mu);
+	return p_bytes;
 }
 
 size_t ChunkQueue::trim_to(size_t max_bytes)
 {
-	std::lock_guard<std::mutex> lk(mu_);
-	stats_.discontinuities++;
+	std::lock_guard<std::mutex> lk(p_mu);
+	p_stats.discontinuities++;
 	size_t dropped = 0;
-	while (!q_.empty() && bytes_ > max_bytes) {
-		bytes_ -= q_.front().size();
-		dropped += q_.front().size();
-		q_.pop_front();
+	while (!p_q.empty() && p_bytes > max_bytes) {
+		p_bytes -= p_q.front().size();
+		dropped += p_q.front().size();
+		p_q.pop_front();
 	}
-	dropped_ += dropped;
+	p_dropped += dropped;
 	return dropped;
 }
 
 void ChunkQueue::mark_discontinuity()
 {
-	std::lock_guard<std::mutex> lk(mu_);
-	stats_.discontinuities++;
+	std::lock_guard<std::mutex> lk(p_mu);
+	p_stats.discontinuities++;
 }
 
 void ChunkQueue::clear()
 {
-	std::lock_guard<std::mutex> lk(mu_);
-	q_.clear();
-	bytes_ = 0;
-	stats_.discontinuities++;
+	std::lock_guard<std::mutex> lk(p_mu);
+	p_q.clear();
+	p_bytes = 0;
+	p_stats.discontinuities++;
 }
 
 // ------------------------------------------------------------------------------ WAV
 
 WavEncoder::WavEncoder(ChunkQueue& q, int rate, int channels) : Encoder(q)
 {
-	frame_bytes_ = 2 * size_t(channels);
-	chunk_bytes_ = 1152 * frame_bytes_;
-	byte_rate_ = rate * 2 * channels;
-	silence_.assign(chunk_bytes_, 0);
+	p_frame_bytes = 2 * size_t(channels);
+	p_chunk_bytes = 1152 * p_frame_bytes;
+	p_byte_rate = rate * 2 * channels;
+	p_silence.assign(p_chunk_bytes, 0);
 }
 
 void WavEncoder::feed(const uint8_t* pcm, size_t n)
 {
-	if (stale_pending_.exchange(false)) std::fill(pending_.begin(), pending_.end(), 0);
-	pending_.insert(pending_.end(), pcm, pcm + n);
-	size_t whole = pending_.size() / chunk_bytes_ * chunk_bytes_;
-	for (size_t i = 0; i < whole; i += chunk_bytes_)
-		queue_.put(Bytes(pending_.begin() + i, pending_.begin() + i + chunk_bytes_));
-	pending_.erase(pending_.begin(), pending_.begin() + whole);
+	if (p_stale_pending.exchange(false)) std::fill(p_pending.begin(), p_pending.end(), 0);
+	p_pending.insert(p_pending.end(), pcm, pcm + n);
+	size_t whole = p_pending.size() / p_chunk_bytes * p_chunk_bytes;
+	for (size_t i = 0; i < whole; i += p_chunk_bytes)
+		p_queue.put(Bytes(p_pending.begin() + i, p_pending.begin() + i + p_chunk_bytes));
+	p_pending.erase(p_pending.begin(), p_pending.begin() + whole);
 }
 
 // ------------------------------------------------------------------------------ MP3
 
 Mp3Encoder::Mp3Encoder(ChunkQueue& q, int rate, int channels, int kbps, const std::string& command)
-    : Encoder(q), channels_(channels)
+    : Encoder(q), p_channels(channels)
 {
-	byte_rate_ = kbps * 1000 / 8;
-	silence_ = silent_mp3_frame(kbps, rate, channels == 2);
+	p_byte_rate = kbps * 1000 / 8;
+	p_silence = silent_mp3_frame(kbps, rate, channels == 2);
 	std::string cmd = command;
 	if (cmd.empty()) {
 		// --nores: no bit reservoir, so every frame decodes on its own. btdisk cuts the stream
@@ -120,8 +120,8 @@ Mp3Encoder::Mp3Encoder(ChunkQueue& q, int rate, int channels, int kbps, const st
 	}
 	int in[2], out[2];
 	if (pipe(in) || pipe(out)) throw std::runtime_error("pipe");
-	pid_ = fork();
-	if (pid_ == 0) {
+	p_pid = fork();
+	if (p_pid == 0) {
 		dup2(in[0], 0);
 		dup2(out[1], 1);
 		close(in[0]);
@@ -133,22 +133,22 @@ Mp3Encoder::Mp3Encoder(ChunkQueue& q, int rate, int channels, int kbps, const st
 	}
 	close(in[0]);
 	close(out[1]);
-	in_fd_ = in[1];
-	out_fd_ = out[0];
+	p_in_fd = in[1];
+	p_out_fd = out[0];
 	signal(SIGPIPE, SIG_IGN);
 	LOGI("mp3 encoder: %s", cmd.c_str());
-	reader_ = std::thread([this] { reader(); });
+	p_reader = std::thread([this] { reader(); });
 }
 
 Mp3Encoder::~Mp3Encoder()
 {
-	if (in_fd_ >= 0) close(in_fd_);
-	if (pid_ > 0) {
-		kill(pid_, SIGTERM);
-		waitpid(pid_, nullptr, 0);
+	if (p_in_fd >= 0) close(p_in_fd);
+	if (p_pid > 0) {
+		kill(p_pid, SIGTERM);
+		waitpid(p_pid, nullptr, 0);
 	}
-	if (reader_.joinable()) reader_.join();
-	if (out_fd_ >= 0) close(out_fd_);
+	if (p_reader.joinable()) p_reader.join();
+	if (p_out_fd >= 0) close(p_out_fd);
 }
 
 void Mp3Encoder::feed(const uint8_t* pcm, size_t n)
@@ -157,17 +157,17 @@ void Mp3Encoder::feed(const uint8_t* pcm, size_t n)
 	// takes each of those through a trap into the kernel: lame then runs 10x slower than real
 	// time, its pipe fills, and the whole stream stalls behind it (radio starved, Bluetooth
 	// packets lost). +-1 LSB of noise (about -100 dBFS) keeps every value far from that range.
-	noisy_.assign(pcm, pcm + n);
-	int16_t* s = reinterpret_cast<int16_t*>(noisy_.data());
+	p_noisy.assign(pcm, pcm + n);
+	int16_t* s = reinterpret_cast<int16_t*>(p_noisy.data());
 	for (size_t i = 0; i < n / 2; i++) {
-		noise_ = noise_ * 1664525u + 1013904223u;
-		int v = s[i] + (noise_ >> 31 ? 1 : -1);  // never a run of exact zeros, no DC
+		p_noise = p_noise * 1664525u + 1013904223u;
+		int v = s[i] + (p_noise >> 31 ? 1 : -1);  // never a run of exact zeros, no DC
 		s[i] = int16_t(std::clamp(v, -32768, 32767));
 	}
-	pcm = noisy_.data();
-	fed_samples_ += n / (2 * size_t(channels_));
+	pcm = p_noisy.data();
+	p_fed_samples += n / (2 * size_t(p_channels));
 	while (n) {
-		ssize_t w = ::write(in_fd_, pcm, n);
+		ssize_t w = ::write(p_in_fd, pcm, n);
 		if (w <= 0) {
 			LOGW("mp3 encoder stopped taking input");
 			return;
@@ -181,7 +181,7 @@ void Mp3Encoder::discard_buffered()
 {
 	// Output frame k holds input samples from about 1152 k - 576 (lame's encoder delay) on, and
 	// overlaps the frame before: up to two frames past the last sample fed carry the old audio.
-	stale_frames_ = fed_samples_ / 1152 + 2;
+	p_stale_frames = p_fed_samples / 1152 + 2;
 }
 
 void Mp3Encoder::reader()
@@ -189,25 +189,25 @@ void Mp3Encoder::reader()
 	Mp3FrameSplitter split;
 	uint8_t buf[4096];
 	ssize_t n;
-	while ((n = ::read(out_fd_, buf, sizeof buf)) > 0)
+	while ((n = ::read(p_out_fd, buf, sizeof buf)) > 0)
 		for (auto& f : split.feed(buf, n)) {
-			if (out_frames_++ < stale_frames_) f = silence_;
-			queue_.put(std::move(f));
+			if (p_out_frames++ < p_stale_frames) f = p_silence;
+			p_queue.put(std::move(f));
 		}
 }
 
 // ------------------------------------------------------------------------------ LiveStream
 
 LiveStream::LiveStream(const StreamConfig& c)
-    : rate_(c.rate), channels_(c.channels), frame_bytes_(2 * c.channels), drift_(c.drift),
-      idle_fill_(c.idle_fill_s), pts_(c.rate), radio_(c.drift.radio_period_s, c.drift.max_ppm),
-      resampler_(c.channels), fade_samples_(c.channels * 1323)
+    : p_rate(c.rate), p_channels(c.channels), p_frame_bytes(2 * c.channels), p_drift(c.drift),
+      p_idle_fill(c.idle_fill_s), p_pts(c.rate), p_radio(c.drift.radio_period_s, c.drift.max_ppm),
+      p_resampler(c.channels), p_fade_samples(c.channels * 1323)
 {
 	if (c.format == "mp3")
-		encoder_ =
-		    std::make_unique<Mp3Encoder>(queue_, c.rate, c.channels, c.mp3_kbps, c.mp3_command);
+		p_encoder =
+		    std::make_unique<Mp3Encoder>(p_queue, c.rate, c.channels, c.mp3_kbps, c.mp3_command);
 	else
-		encoder_ = std::make_unique<WavEncoder>(queue_, c.rate, c.channels);
+		p_encoder = std::make_unique<WavEncoder>(p_queue, c.rate, c.channels);
 }
 
 LiveStream::~LiveStream()
@@ -217,107 +217,107 @@ LiveStream::~LiveStream()
 
 void LiveStream::start()
 {
-	thread_ = std::thread([this] { clock_loop(); });
+	p_thread = std::thread([this] { clock_loop(); });
 }
 
 void LiveStream::stop()
 {
 	{
-		std::lock_guard<std::mutex> lk(mu_);
-		stop_ = true;
+		std::lock_guard<std::mutex> lk(p_mu);
+		p_stop = true;
 	}
-	stop_cv_.notify_all();
-	if (thread_.joinable()) thread_.join();
+	p_stop_cv.notify_all();
+	if (p_thread.joinable()) p_thread.join();
 }
 
 double LiveStream::out_scale() const
 {
-	return drift_.enabled ? 1 + radio_.trim_ppm() * 1e-6 : 1;
+	return p_drift.enabled ? 1 + p_radio.trim_ppm() * 1e-6 : 1;
 }
 
 StreamStatus LiveStream::status() const
 {
-	std::lock_guard<std::mutex> lk(mu_);
+	std::lock_guard<std::mutex> lk(p_mu);
 	StreamStatus st;
-	st.source_active = source_active_;
-	st.phone_ppm = std::clamp(pts_.ppm(), -drift_.max_ppm, drift_.max_ppm);
-	st.radio_ppm = radio_.ppm();
-	st.trim_ppm = radio_.trim_ppm();
-	st.radio_locked = radio_.locked();
+	st.source_active = p_source_active;
+	st.phone_ppm = std::clamp(p_pts.ppm(), -p_drift.max_ppm, p_drift.max_ppm);
+	st.radio_ppm = p_radio.ppm();
+	st.trim_ppm = p_radio.trim_ppm();
+	st.radio_locked = p_radio.locked();
 	return st;
 }
 
 void LiveStream::phone_reset()
 {
-	std::lock_guard<std::mutex> lk(mu_);
-	pts_.reset();
+	std::lock_guard<std::mutex> lk(p_mu);
+	p_pts.reset();
 }
 
 void LiveStream::phone_timing(uint64_t position, double arrival)
 {
-	std::lock_guard<std::mutex> lk(mu_);
-	pts_.update(position, arrival);
+	std::lock_guard<std::mutex> lk(p_mu);
+	p_pts.update(position, arrival);
 }
 
 void LiveStream::write_pcm(const uint8_t* data, size_t n)
 {
-	std::lock_guard<std::mutex> lk(mu_);
-	partial_.insert(partial_.end(), data, data + n);
-	size_t whole = partial_.size() / frame_bytes_ * frame_bytes_;
+	std::lock_guard<std::mutex> lk(p_mu);
+	p_partial.insert(p_partial.end(), data, data + n);
+	size_t whole = p_partial.size() / p_frame_bytes * p_frame_bytes;
 	if (!whole) return;
-	if (!source_active_) LOGI("audio source active");
-	source_active_ = true;
-	last_input_ = now_s();
-	if (drift_.enabled) {
+	if (!p_source_active) LOGI("audio source active");
+	p_source_active = true;
+	p_last_input = now_s();
+	if (p_drift.enabled) {
 		// Phone samples to radio samples: undo the phone's drift, apply the radio's. A new phone
 		// estimate steps the ratio by a few hundred ppm at most: a fraction of a cent.
-		double phone = std::clamp(pts_.ppm(), -drift_.max_ppm, drift_.max_ppm);
+		double phone = std::clamp(p_pts.ppm(), -p_drift.max_ppm, p_drift.max_ppm);
 		double ratio = out_scale() / (1 + phone * 1e-6);
-		resampled_.clear();
-		resampler_.process(reinterpret_cast<const int16_t*>(partial_.data()), whole / frame_bytes_,
-		                   ratio, resampled_);
-		feed_phone(reinterpret_cast<const uint8_t*>(resampled_.data()), resampled_.size() * 2);
+		p_resampled.clear();
+		p_resampler.process(reinterpret_cast<const int16_t*>(p_partial.data()),
+		                    whole / p_frame_bytes, ratio, p_resampled);
+		feed_phone(reinterpret_cast<const uint8_t*>(p_resampled.data()), p_resampled.size() * 2);
 	} else {
-		feed_phone(partial_.data(), whole);
+		feed_phone(p_partial.data(), whole);
 	}
-	partial_.erase(partial_.begin(), partial_.begin() + whole);
+	p_partial.erase(p_partial.begin(), p_partial.begin() + whole);
 }
 
 void LiveStream::clock_loop()
 {
-	// While the source delivers, it is the clock. Once it has been quiet for idle_fill_ seconds
+	// While the source delivers, it is the clock. Once it has been quiet for p_idle_fill seconds
 	// we produce silence at the radio's pace (the Pi's clock, trimmed) until it comes back.
 	double t0 = now_s(), produced = 0, last_log = t0;
 	Bytes zeros;
-	std::unique_lock<std::mutex> lk(mu_);
-	while (!stop_) {
-		stop_cv_.wait_for(lk, std::chrono::milliseconds(20));
-		if (stop_) break;
+	std::unique_lock<std::mutex> lk(p_mu);
+	while (!p_stop) {
+		p_stop_cv.wait_for(lk, std::chrono::milliseconds(20));
+		if (p_stop) break;
 		double now = now_s();
-		if (drift_.enabled) radio_.update(now, queue_.take_read_stats(), encoder_->byte_rate());
-		if (drift_.enabled && source_active_ && now - last_log >= 60) {  // quiet while idle
+		if (p_drift.enabled) p_radio.update(now, p_queue.take_read_stats(), p_encoder->byte_rate());
+		if (p_drift.enabled && p_source_active && now - last_log >= 60) {  // quiet while idle
 			last_log = now;
-			LOGI("clock: phone %+.0f ppm%s, radio %+.0f ppm%s", pts_.ppm(),
-			     pts_.valid() ? "" : " (measuring)", radio_.ppm(),
-			     radio_.locked() ? "" : " (holding)");
+			LOGI("clock: phone %+.0f ppm%s, radio %+.0f ppm%s", p_pts.ppm(),
+			     p_pts.valid() ? "" : " (measuring)", p_radio.ppm(),
+			     p_radio.locked() ? "" : " (holding)");
 		}
-		if (now - last_input_ <= idle_fill_) {
+		if (now - p_last_input <= p_idle_fill) {
 			t0 = now;
 			produced = 0;
 			continue;
 		}
-		if (source_active_) {
-			source_active_ = false;
-			resampler_.reset();
+		if (p_source_active) {
+			p_source_active = false;
+			p_resampler.reset();
 			t0 = now;
 			produced = 0;
 			LOGI("audio source idle, sending silence");
 		}
-		long frames = long(((now - t0) * out_scale() - produced) * rate_);
+		long frames = long(((now - t0) * out_scale() - produced) * p_rate);
 		if (frames < 256) continue;
-		produced += double(frames) / rate_;
-		zeros.assign(size_t(frames) * frame_bytes_, 0);
-		encoder_->feed(zeros.data(), zeros.size());
+		produced += double(frames) / p_rate;
+		zeros.assign(size_t(frames) * p_frame_bytes, 0);
+		p_encoder->feed(zeros.data(), zeros.size());
 	}
 }
 
@@ -326,49 +326,49 @@ void LiveStream::clock_loop()
 void LiveStream::mute_phone(double max_s)
 {
 	{
-		std::lock_guard<std::mutex> lk(gate_mu_);
-		muted_ = true;
-		mute_until_ = now_s() + max_s;
-		fade_ = -1;
+		std::lock_guard<std::mutex> lk(p_gate_mu);
+		p_muted = true;
+		p_mute_until = now_s() + max_s;
+		p_fade = -1;
 	}
-	encoder_->discard_buffered();
+	p_encoder->discard_buffered();
 }
 
 void LiveStream::unmute_phone(double after_s)
 {
-	std::lock_guard<std::mutex> lk(gate_mu_);
-	if (muted_) mute_until_ = std::min(mute_until_, now_s() + after_s);
+	std::lock_guard<std::mutex> lk(p_gate_mu);
+	if (p_muted) p_mute_until = std::min(p_mute_until, now_s() + after_s);
 }
 
 bool LiveStream::phone_muted() const
 {
-	std::lock_guard<std::mutex> lk(gate_mu_);
-	return muted_;
+	std::lock_guard<std::mutex> lk(p_gate_mu);
+	return p_muted;
 }
 
 void LiveStream::feed_phone(const uint8_t* pcm, size_t n)
 {
-	std::unique_lock<std::mutex> lk(gate_mu_);
-	if (muted_ && now_s() >= mute_until_) {
-		muted_ = false;
-		fade_ = 0;
+	std::unique_lock<std::mutex> lk(p_gate_mu);
+	if (p_muted && now_s() >= p_mute_until) {
+		p_muted = false;
+		p_fade = 0;
 	}
-	if (!muted_ && fade_ < 0) {
+	if (!p_muted && p_fade < 0) {
 		lk.unlock();
-		encoder_->feed(pcm, n);
+		p_encoder->feed(pcm, n);
 		return;
 	}
-	gated_.assign(pcm, pcm + n);
-	int16_t* s = reinterpret_cast<int16_t*>(gated_.data());
+	p_gated.assign(pcm, pcm + n);
+	int16_t* s = reinterpret_cast<int16_t*>(p_gated.data());
 	size_t count = n / 2;
-	if (muted_) {
+	if (p_muted) {
 		memset(s, 0, count * 2);
 	} else {
-		for (size_t i = 0; i < count && fade_ >= 0; i++) {
-			s[i] = int16_t(s[i] * (double(fade_) / fade_samples_));
-			if (++fade_ >= fade_samples_) fade_ = -1;
+		for (size_t i = 0; i < count && p_fade >= 0; i++) {
+			s[i] = int16_t(s[i] * (double(p_fade) / p_fade_samples));
+			if (++p_fade >= p_fade_samples) p_fade = -1;
 		}
 	}
 	lk.unlock();
-	encoder_->feed(gated_.data(), n);
+	p_encoder->feed(p_gated.data(), n);
 }
