@@ -40,6 +40,7 @@ add_library(btdisk_core STATIC
   src/log.cpp
   src/player.cpp
   src/scsi.cpp
+  src/settings.cpp
   src/stream.cpp
   src/usb_disk.cpp)
 target_include_directories(btdisk_core PUBLIC src)

@@ -1,15 +1,12 @@
 // btdisk: a USB flash drive whose "music files" play the phone's Bluetooth audio.
 //
-//   btdisk -c /etc/btdisk.conf                     the daemon (FunctionFS at usb.ffs)
+//   btdisk [-c /etc/btdisk.conf -c /boot/btdisk.txt] the daemon (FunctionFS at usb.ffs)
 //   btdisk -c FILE --dump-image disk.img           write the volume as a sparse image (checks)
 //   btdisk -c FILE --tone 440                      a sine instead of Bluetooth (bench tests)
 
 #include "a2dp.h"
 #include "bluez.h"
-#include "config.h"
-#include "player.h"
-#include "stream.h"
-#include "usb_disk.h"
+#include "settings.h"
 
 #include <atomic>
 #include <cmath>
@@ -21,83 +18,6 @@
 #include <unistd.h>
 
 namespace {
-
-PlayerConfig player_config(const Config& c) {
-    PlayerConfig p;
-    p.format = c.str("audio.format", p.format);
-    p.rate = c.num("audio.rate", p.rate);
-    p.channels = c.num("audio.channels", p.channels);
-    p.files = c.num("player.files", p.files);
-    p.file_size = uint32_t(std::min<long>(c.num("player.file_mb", 512), 4095) << 20);
-    p.wav_info = c.flag("player.wav_info", p.wav_info);
-    p.charset = parse_charset(c.str("player.charset", "latin1"));
-    p.dynamic_names = c.flag("player.dynamic_names", p.dynamic_names);
-    p.name_prefix = c.str("player.name_prefix", p.name_prefix);
-    p.target_latency_s = c.num("player.target_latency_ms", 200) / 1000.0;
-    p.max_latency_s = c.num("player.max_latency_ms", 6000) / 1000.0;
-    p.max_block_s = c.real("player.max_block_s", p.max_block_s);
-    p.cache_bytes = size_t(c.num("player.cache_mb", 8)) << 20;
-    p.guard_s = c.real("player.guard_s", p.guard_s);
-    p.metadata_wait_s = c.num("player.metadata_wait_ms", 1500) / 1000.0;
-    p.restart_is_previous = c.flag("player.restart_is_previous", p.restart_is_previous);
-    p.restart_threshold_s = c.real("player.restart_threshold_s", p.restart_threshold_s);
-    p.phone_restart_s = c.real("player.phone_restart_s", p.phone_restart_s);
-    p.skip_mute = c.flag("player.skip_mute", p.skip_mute);
-    p.skip_mute_s = c.num("player.skip_mute_ms", 300) / 1000.0;
-    p.pause_after_s = c.real("player.pause_after_s", p.pause_after_s);
-    p.autoplay = c.flag("player.autoplay", p.autoplay);
-    p.tags = c.str("player.tags", p.tags);
-    if (p.tags != "phone" && p.tags != "track") {
-        LOGW("player.tags must be phone or track, not %s: phone", p.tags.c_str());
-        p.tags = "phone";
-    }
-    return p;
-}
-
-StreamConfig stream_config(const Config& c, const PlayerConfig& pc) {
-    StreamConfig s;
-    s.format = pc.format;
-    s.rate = pc.rate;
-    s.channels = pc.channels;
-    s.mp3_kbps = c.num("audio.mp3_kbps", s.mp3_kbps);
-    s.mp3_command = c.str("audio.mp3_command", "");
-    s.drift.enabled = c.flag("audio.drift_correction", s.drift.enabled);
-    s.drift.radio_period_s = c.real("audio.drift_period_s", s.drift.radio_period_s);
-    return s;
-}
-
-BluezOptions bluez_options(const Config& c) {
-    BluezOptions b;
-    b.alias = c.str("bluetooth.alias", b.alias);
-    b.agent = c.flag("bluetooth.agent", b.agent);
-    b.discoverable_s = c.real("bluetooth.discoverable_s", b.discoverable_s);
-    b.central = c.flag("bluetooth.central", b.central);
-    b.reconnect_s = c.real("bluetooth.reconnect_s", b.reconnect_s);
-    b.last_phone_file = c.str("bluetooth.last_phone_file", "/data/last-phone");
-    return b;
-}
-
-FatOptions fat_options(const Config& c, const PlayerConfig& pc) {
-    FatOptions f;
-    f.fat32 = c.str("usb.fat", "fat32") != "fat16";
-    f.cluster_size = uint32_t(c.num("usb.cluster_kb", 32) * 1024);
-    f.label = c.str("usb.label", f.label);
-    f.partition_offset = c.flag("usb.partition_table", true) ? 2048 : 0;
-    f.dynamic_names = pc.dynamic_names;
-    return f;
-}
-
-UsbDiskOptions usb_options(const Config& c) {
-    UsbDiskOptions u;
-    u.ffs = c.str("usb.ffs", u.ffs);
-    u.gadget = c.str("usb.gadget", u.gadget);
-    u.udc = c.str("usb.udc", u.udc);
-    u.vendor = c.str("usb.vendor", u.vendor);
-    u.product = c.str("usb.product", u.product);
-    u.serial = c.str("usb.serial", u.serial);
-    u.read_only = c.flag("usb.read_only", u.read_only);
-    return u;
-}
 
 // A test sine instead of the phone, paced by the wall clock like a phone would be.
 void play_tone(LiveStream& stream, double hz, int rate, int channels) {
@@ -164,14 +84,18 @@ int dump_image(FatVolume& vol, LiveStream& stream, const std::string& path) {
 
 void usage() {
     fprintf(stderr,
-            "usage: btdisk [-c CONFIG] [-v] [--ffs DIR] [--tone HZ] [--no-bluetooth]\n"
-            "              [--dump-image FILE]\n");
+            "usage: btdisk [-c CONFIG]... [-v] [--ffs DIR] [--tone HZ] [--no-bluetooth]\n"
+            "              [--dump-image FILE]\n"
+            "  -c: settings files, each on top of the one before\n"
+            "      (default: /etc/btdisk.conf, then /boot/btdisk.txt)\n");
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::string config_path = "/etc/btdisk.conf", ffs_dir, dump;
+    // The image's settings, then the ones on the SD card's boot partition, which a PC can edit.
+    std::vector<std::string> config_paths;
+    std::string ffs_dir, dump;
     double tone = 0;
     bool no_bt = false;
     static option opts[] = {{"config", required_argument, nullptr, 'c'},
@@ -184,7 +108,7 @@ int main(int argc, char** argv) {
                             {}};
     for (int c; (c = getopt_long(argc, argv, "c:vh", opts, nullptr)) != -1;) {
         switch (c) {
-        case 'c': config_path = optarg; break;
+        case 'c': config_paths.push_back(optarg); break;
         case 'v': g_log_level = 2; break;
         case 'f': ffs_dir = optarg; break;
         case 't': tone = atof(optarg); break;
@@ -193,40 +117,44 @@ int main(int argc, char** argv) {
         default: usage(); return c == 'h' ? 0 : 2;
         }
     }
+    if (config_paths.empty()) config_paths = {"/etc/btdisk.conf", "/boot/btdisk.txt"};
     Config cfg;
-    std::string err;
-    if (access(config_path.c_str(), R_OK) == 0 && !cfg.load(config_path, err)) {
-        fprintf(stderr, "%s\n", err.c_str());
-        return 2;
-    }
-    if (cfg.flag("debug", false)) g_log_level = 2;
-    std::string log_file = cfg.str("log.file", "");
-    g_trace = cfg.flag("log.trace", false);
-    if (!log_file.empty() && !dump.empty()) log_file.clear();
-    if (!log_file.empty()) log_to_file(log_file, size_t(cfg.num("log.file_kb", 1024)) << 10);
+    std::string loaded;
+    for (const std::string& path : config_paths)
+        if (cfg.load(path)) loaded += (loaded.empty() ? "" : " + ") + path;
+    Settings set = read_settings(cfg);
+
+    if (set.log.debug) g_log_level = 2;
+    g_trace = set.log.trace;
+    if (!set.log.file.empty() && dump.empty()) log_to_file(set.log.file, set.log.file_bytes);
     signal(SIGPIPE, SIG_IGN);
 
-    PlayerConfig pc = player_config(cfg);
+    const PlayerConfig& pc = set.player;
     LOGI("btdisk %s: %s%s, %d files, latency %.0f ms, restart_threshold_s %.1f, phone_restart_s %.1f, "
          "skip_mute %s %.0f ms, pause_after_s %.1f, tags %s, codecs %s%s", btdisk_version(),
-         pc.format.c_str(), pc.format == "mp3" ? (" " + std::to_string(cfg.num("audio.mp3_kbps", 256)) + " kbps").c_str() : "",
+         pc.format.c_str(), pc.format == "mp3" ? (" " + std::to_string(set.stream.mp3_kbps) + " kbps").c_str() : "",
          pc.files, pc.target_latency_s * 1000, pc.restart_threshold_s, pc.phone_restart_s,
          pc.skip_mute ? "on" : "off", pc.skip_mute_s * 1000, pc.pause_after_s, pc.tags.c_str(),
-         cfg.str("bluetooth.codecs", kDefaultCodecs).c_str(), g_trace ? ", trace" : "");
-    LiveStream stream(stream_config(cfg, pc));
+         set.a2dp.codecs.c_str(), g_trace ? ", trace" : "");
+    // Where the settings came from, and what a later file (the SD card's) changed or got wrong.
+    LOGI("settings: %s", loaded.empty() ? "none found, all defaults" : loaded.c_str());
+    for (const std::string& c : cfg.changes()) LOGI("settings: %s", c.c_str());
+    for (const std::string& w : cfg.warnings()) LOGW("settings: %s", w.c_str());
+    for (const std::string& k : cfg.unknown_keys()) LOGW("settings: unknown setting %s", k.c_str());
+
+    LiveStream stream(set.stream);
     bool live = dump.empty();
     std::unique_ptr<A2dpSink> a2dp;
     if (live && tone <= 0)
-        a2dp = std::make_unique<A2dpSink>(stream, cfg.flag("audio.apply_volume", true),
-                                          cfg.num("audio.rt_priority", 30),
-                                          cfg.flag("bluetooth.delay_reporting", true)
+        a2dp = std::make_unique<A2dpSink>(stream, set.a2dp.apply_volume, set.a2dp.rt_priority,
+                                          set.a2dp.delay_reporting
                                               ? int(pc.target_latency_s * 1000 + 0.5) : 0,
-                                          parse_codecs(cfg.str("bluetooth.codecs", kDefaultCodecs)));
+                                          parse_codecs(set.a2dp.codecs));
 
     std::unique_ptr<MediaControl> control;
     Bluez* bluez = nullptr;
-    if (live && !no_bt && cfg.flag("bluetooth.enabled", true)) {
-        auto b = std::make_unique<Bluez>(bluez_options(cfg), a2dp.get());
+    if (live && !no_bt && set.bluetooth) {
+        auto b = std::make_unique<Bluez>(set.bluez, a2dp.get());
         bluez = b.get();
         control = std::move(b);
     } else {
@@ -234,7 +162,7 @@ int main(int argc, char** argv) {
     }
 
     Player player(pc, stream, *control);
-    FatOptions fo = fat_options(cfg, pc);
+    const FatOptions& fo = set.fat;
     FatVolume vol(player.make_files(), fo);
     LOGI("volume: %s, %d x %s files of %u MiB, %.1f GiB", fo.fat32 ? "FAT32" : "FAT16", pc.files,
          pc.format.c_str(), player.file_size() >> 20, vol.total_sectors() * kSector / 1073741824.0);
@@ -243,9 +171,8 @@ int main(int argc, char** argv) {
     stream.start();
     if (tone > 0) std::thread(play_tone, std::ref(stream), tone, pc.rate, pc.channels).detach();
 
-    UsbDiskOptions uo = usb_options(cfg);
-    if (!ffs_dir.empty()) uo.ffs = ffs_dir;
-    UsbDisk usb(vol, uo);
+    if (!ffs_dir.empty()) set.usb.ffs = ffs_dir;
+    UsbDisk usb(vol, set.usb);
     usb.on_mount = [&] { player.on_mount(); };
     usb.on_disconnect = [&] { player.on_disconnect(); };
 
