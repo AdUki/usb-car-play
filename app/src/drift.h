@@ -24,41 +24,44 @@
 /// sample's place on the phone's timeline and when it arrived. Arrival jitter only ever adds
 /// delay, so the lower envelope of (arrival - position / rate) is the clean line. Its slope is
 /// the drift, fitted by least squares over the windows' minima.
-class PtsClock {
+class PtsClock
+{
 public:
-    explicit PtsClock(double rate, double window_s = 2, double span_s = 600);
-    /// a new stream: keeps the last estimate
-    void reset();
-    void update(uint64_t position, double arrival);
-    /// + = the phone's clock runs fast
-    double ppm() const { return ppm_; }
-    bool valid() const { return valid_; }
+	explicit PtsClock(double rate, double window_s = 2, double span_s = 600);
+	/// a new stream: keeps the last estimate
+	void reset();
+	void update(uint64_t position, double arrival);
+	/// + = the phone's clock runs fast
+	double ppm() const { return ppm_; }
+	bool valid() const { return valid_; }
 
 private:
-    void fit();
-    double rate_, window_, span_;
-    bool in_window_ = false;
-    double win_start_ = 0, win_min_ = 0, win_t_ = 0, t0_ = 0;
-    /// (time, minimum delay) per window
-    std::deque<std::pair<double, double>> mins_;
-    /// error_ppm_: the last fit's standard error
-    double ppm_ = 0, error_ppm_ = 0;
-    bool valid_ = false;
+	void fit();
+	double rate_, window_, span_;
+	bool in_window_ = false;
+	double win_start_ = 0, win_min_ = 0, win_t_ = 0, t0_ = 0;
+	/// (time, minimum delay) per window
+	std::deque<std::pair<double, double>> mins_;
+	/// error_ppm_: the last fit's standard error
+	double ppm_ = 0, error_ppm_ = 0;
+	bool valid_ = false;
 };
 
 /// What the radio's reads did since the last look, collected by the chunk queue (stream.h).
-struct ReadStats {
-    /// chunks the radio took
-    uint64_t gets = 0;
-    /// of those, how many found the queue empty
-    uint64_t waits = 0;
-    /// the backlog was cut (a new file, a skip to live)
-    uint64_t discontinuities = 0;
-    /// queue bytes left after each get, summed
-    double backlog_sum = 0;
-    /// Seconds since the producer's last chunk, at each get, summed: the part of a chunk already
-    /// made. With it the backlog is measured in time, not in steps of a whole chunk (26 ms).
-    double since_put_sum = 0;
+struct ReadStats
+{
+	/// chunks the radio took
+	uint64_t gets = 0;
+	/// of those, how many found the queue empty
+	uint64_t waits = 0;
+	/// the backlog was cut (a new file, a skip to live)
+	uint64_t discontinuities = 0;
+	/// queue bytes left after each get, summed
+	double backlog_sum = 0;
+
+	/// Seconds since the producer's last chunk, at each get, summed: the part of a chunk already
+	/// made. With it the backlog is measured in time, not in steps of a whole chunk (26 ms).
+	double since_put_sum = 0;
 };
 
 /// The radio's clock against the Pi's. While the radio paces its own reads (its buffer is full
@@ -66,48 +69,51 @@ struct ReadStats {
 /// rates differ. A PI loop holds that backlog where it settled by trimming the output rate. When
 /// the queue runs dry, the radio is waiting for us and its clock can't be seen: the loop holds
 /// its last trim.
-class RadioClock {
+class RadioClock
+{
 public:
-    explicit RadioClock(double period_s = 300, double max_ppm = 1000);
-    void update(double now, const ReadStats& s, double byte_rate);
-    /// the radio's clock, + = fast
-    double ppm() const { return integral_; }
-    /// to apply: the clock + the backlog's error
-    double trim_ppm() const;
-    bool locked() const { return settle_ == 0; }
+	explicit RadioClock(double period_s = 300, double max_ppm = 1000);
+	void update(double now, const ReadStats& s, double byte_rate);
+	/// the radio's clock, + = fast
+	double ppm() const { return integral_; }
+	/// to apply: the clock + the backlog's error
+	double trim_ppm() const;
+	bool locked() const { return settle_ == 0; }
 
 private:
-    void end_window(double byte_rate);
-    double window_, kp_, ki_, max_;
-    double win_start_ = -1;
-    ReadStats win_;
-    int settle_;
-    double setpoint_ = 0, error_ = 0, integral_ = 0;
+	void end_window(double byte_rate);
+	double window_, kp_, ki_, max_;
+	double win_start_ = -1;
+	ReadStats win_;
+	int settle_;
+	double setpoint_ = 0, error_ = 0, integral_ = 0;
 };
 
 /// An asynchronous sample rate converter for ratios close to 1: a windowed-sinc FIR, polyphase
 /// with linear interpolation between phases, so any ratio (and a ratio that changes from one
 /// call to the next) works without clicks.
-class Resampler {
+class Resampler
+{
 public:
-    explicit Resampler(int channels);
-    /// Converts `frames` interleaved s16 frames at `ratio` output frames per input frame, and
-    /// appends the result to out.
-    void process(const int16_t* in, size_t frames, double ratio, std::vector<int16_t>& out);
-    void reset();
-    /// input to output
-    static constexpr int delay_frames() { return kTaps / 2; }
+	explicit Resampler(int channels);
+
+	/// Converts `frames` interleaved s16 frames at `ratio` output frames per input frame, and
+	/// appends the result to out.
+	void process(const int16_t* in, size_t frames, double ratio, std::vector<int16_t>& out);
+	void reset();
+	/// input to output
+	static constexpr int delay_frames() { return kTaps / 2; }
 
 private:
-    static constexpr int kTaps = 48;
-    static constexpr int kPhases = 256;
-    int ch_;
-    /// kPhases rows of kTaps
-    std::vector<float> coef_;
-    /// each row's step to the next phase's
-    std::vector<float> delta_;
-    /// input frames still needed, interleaved
-    std::vector<float> hist_;
-    /// input frame of the next output frame
-    double pos_;
+	static constexpr int kTaps = 48;
+	static constexpr int kPhases = 256;
+	int ch_;
+	/// kPhases rows of kTaps
+	std::vector<float> coef_;
+	/// each row's step to the next phase's
+	std::vector<float> delta_;
+	/// input frames still needed, interleaved
+	std::vector<float> hist_;
+	/// input frame of the next output frame
+	double pos_;
 };

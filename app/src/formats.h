@@ -7,22 +7,29 @@
 #include <string>
 
 /// What the tags say about a track.
-struct TrackInfo {
-    /// UTF-8
-    std::string title, artist, album;
-    uint32_t track_number = 0;
-    uint32_t duration_ms = 0;
+struct TrackInfo
+{
+	/// UTF-8
+	std::string title, artist, album;
+	uint32_t track_number = 0;
+	uint32_t duration_ms = 0;
 
-    std::string display_name() const;
-    bool same_track(const TrackInfo& o) const {
-        return title == o.title && artist == o.artist && album == o.album &&
-               track_number == o.track_number;
-    }
+	std::string display_name() const;
+	bool same_track(const TrackInfo& o) const
+	{
+		return title == o.title && artist == o.artist && album == o.album &&
+		       track_number == o.track_number;
+	}
 };
 
 /// How much of Unicode an old head unit can show. Latin1 keeps Latin-1 and strips the accents
 /// of the rest (č -> c), Ascii strips everything to 7 bits, Unicode keeps the text.
-enum class Charset { Latin1, Ascii, Unicode };
+enum class Charset
+{
+	Latin1,
+	Ascii,
+	Unicode
+};
 Charset parse_charset(const std::string& s);
 
 /// Latin-1 bytes
@@ -44,12 +51,14 @@ Bytes id3v1_tag(const TrackInfo& t);
 int mp3_frame_length(const uint8_t* h);
 
 /// Cuts an MP3 byte stream into whole frames.
-class Mp3FrameSplitter {
+class Mp3FrameSplitter
+{
 public:
-    /// Appends data and returns the whole frames now available (Xing/Info frames dropped).
-    std::vector<Bytes> feed(const uint8_t* data, size_t n);
+	/// Appends data and returns the whole frames now available (Xing/Info frames dropped).
+	std::vector<Bytes> feed(const uint8_t* data, size_t n);
+
 private:
-    Bytes buf_;
+	Bytes buf_;
 };
 
 Bytes silent_mp3_frame(int kbps, int rate, bool stereo);
