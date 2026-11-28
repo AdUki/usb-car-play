@@ -85,6 +85,8 @@ struct FakePhone : MediaControl {
     }
     void clear() { std::lock_guard<std::mutex> lk(mu); sent.clear(); }
     std::string phone_name() override { return "Test Phone"; }
+    std::vector<double> delays;   // set_delay()'s, in seconds
+    void set_delay(double ms) override { std::lock_guard<std::mutex> lk(mu); delays.push_back(ms / 1000); }
 };
 
 static void test_formats() {
@@ -387,8 +389,7 @@ static void test_player() {
         PlayerRig r;
         r.cfg.max_latency_s = 6;
         r.player = std::make_unique<Player>(r.cfg, r.stream, r.phone);
-        std::vector<double> told;
-        r.player->on_latency = [&](double s) { told.push_back(s); };
+        const std::vector<double>& told = r.phone.delays;
         r.read(2, 44, 65536);
         r.read(2, 44 + 65536, 65536);                  // carries on: playback of file 3
         CHECK_EQ(told.size(), size_t(1));

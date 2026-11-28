@@ -270,9 +270,6 @@ int main(int argc, char** argv) {
     }
 
     Player player(pc, stream, *control);
-    player.on_latency = [&](double s) {
-        if (a2dp) a2dp->set_delay(s * 1000);
-    };
     FatOptions fo = fat_options(cfg, pc);
     FatVolume vol(player.make_files(), fo);
     LOGI("volume: %s, %d x %s files of %u MiB, %.1f GiB", fo.fat32 ? "FAT32" : "FAT16", pc.files,

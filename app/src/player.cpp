@@ -117,7 +117,7 @@ void Player::latency_changed() {
     double l = data_.latency_s();
     if (l == latency_) return;
     latency_ = l;
-    if (on_latency) on_latency(l);
+    control_.set_delay(l * 1000);   // a host's big reads, or back to the target on a new host
 }
 
 TrackInfo Player::tag_info() {

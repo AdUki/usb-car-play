@@ -42,6 +42,7 @@ public:
     bool connected() override;
     void command(const std::string& cmd) override;
     std::string phone_name() override;
+    void set_delay(double ms) override;     // to the A2DP sink, sent on the bus thread
 
 private:
     struct Bus;                             // the sd-bus callbacks (bluez.cpp)

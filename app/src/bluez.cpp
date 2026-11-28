@@ -706,6 +706,13 @@ void Bluez::command(const std::string& cmd) {
     if (wake_fd_ >= 0 && write(wake_fd_, &one, 8) < 0) {}
 }
 
+void Bluez::set_delay(double ms) {
+    if (!a2dp_) return;
+    a2dp_->set_delay(ms);
+    uint64_t one = 1;
+    if (wake_fd_ >= 0 && write(wake_fd_, &one, 8) < 0) {}   // loop_event() applies it now
+}
+
 TrackInfo Bluez::track() {
     std::lock_guard<std::mutex> lk(mu_);
     return track_;

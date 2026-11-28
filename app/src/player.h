@@ -34,6 +34,9 @@ public:
     virtual bool connected() = 0;
     virtual void command(const std::string& cmd) = 0;  // next previous play pause
     virtual std::string phone_name() { return ""; }   // the connected (or last) phone
+    // How far behind the phone the radio plays (A2DP delay reporting, for its A/V sync). Called
+    // with the player's lock held: keep it short.
+    virtual void set_delay(double ms) { (void)ms; }
 };
 
 class NullControl : public MediaControl {
@@ -101,10 +104,6 @@ public:
     const LiveFileData& data() const { return data_; }
     std::vector<std::string> events();   // recent decisions, for tests and the log
 
-    // The latency changed (a host's big reads, or back to the target on a new host): the delay
-    // to report to the phone. Called with the player's lock held: keep it short.
-    std::function<void(double latency_s)> on_latency;
-
 private:
     void on_other_file(int i);
     void maybe_restart(int i);
@@ -164,7 +163,7 @@ private:
     int trace_file_ = -1;                    // the log's read trace: where the last read ended
     uint64_t trace_next_ = 0;
     double last_read_ = 0;
-    double latency_ = 0;                     // last given to on_latency
+    double latency_ = 0;                     // last given to control_.set_delay
     std::mutex ev_mu_;
     std::vector<std::string> events_;
 };
