@@ -40,14 +40,22 @@ make flash DISK=/dev/sdX
 ```
 
 Plug the Pi's **USB** port (not PWR) into the radio. Within 3 minutes of power-on, pair your
-phone with **Car USB**. No PIN is needed. Every setting is optional and documented in
-[`config/btdisk.conf`](config/btdisk.conf), which is installed as `/etc/btdisk.conf`.
+phone with **Car USB**. No PIN is needed.
 After power-on it calls the phone that was connected last, every 5 s for the first 3 minutes.
+
+### Settings
+
+Put the SD card into any PC and open its `boot` drive: `btdisk.txt` there has every setting,
+each with what it does (MP3 or WAV, the latency, autoplay, pausing, the tags, the codecs, …).
+Edit it in any text editor, save, and put the card back: the settings apply at the next
+power-on, no new image needed. Delete a line and that setting goes back to how the image was
+built (`/etc/btdisk.conf`, made from [`config/btdisk.conf`](config/btdisk.conf)). A typo can't
+stop the stick: a line or value btdisk can't read keeps its default, and the log says which.
 
 The image writes to the SD card only when a phone pairs or a different one connects (BlueZ's
 pairings and the last phone, on the data partition): the log stays in RAM. To find out what
-goes wrong in the car, build with `make image TRACE=1`: then the data partition keeps the
-story across power cuts. `btdisk.log` (and `.1`) has what the radio read and when it paused,
+goes wrong in the car, set `trace = true` and `file = /data/btdisk.log` in `btdisk.txt` (or
+build with `make image TRACE=1`): then the data partition keeps the story across power cuts. `btdisk.log` (and `.1`) has what the radio read and when it paused,
 what was sent to the phone and how long it took, the muting around it and the Bluetooth
 connections, every drive numbered (`run N`); `syslog.log` has bluetoothd's and the kernel's.
 
