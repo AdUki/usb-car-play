@@ -1,11 +1,12 @@
-// A FAT16/FAT32 volume that exists only as a function lba -> bytes.
-//
-// Nothing is stored: the MBR, boot sector, FATs and directory are computed when the host
-// reads them, and file data comes from each file's read callback. That is what lets the
-// radio see files of a GiB whose contents are produced live.
-//
-// Layout: MBR (optional), one partition, root directory (FAT32: cluster 2), then every file
-// as one contiguous cluster run.
+/// @file
+/// A FAT16/FAT32 volume that exists only as a function lba -> bytes.
+///
+/// Nothing is stored: the MBR, boot sector, FATs and directory are computed when the host
+/// reads them, and file data comes from each file's read callback. That is what lets the
+/// radio see files of a GiB whose contents are produced live.
+///
+/// Layout: MBR (optional), one partition, root directory (FAT32: cluster 2), then every file
+/// as one contiguous cluster run.
 #pragma once
 
 #include "common.h"
@@ -16,30 +17,38 @@
 
 constexpr size_t kSector = 512;
 
+/// One file on the volume: its name and size, and callbacks that make its bytes.
 struct VirtualFile {
-    std::string short_name;                                     // 8.3, "TRACK01.WAV"
+    /// 8.3, "TRACK01.WAV"
+    std::string short_name;
     uint32_t size = 0;
     std::function<void(uint32_t off, uint8_t* dst, size_t n)> read;
-    // The same bytes, for a read that started in the file before and only runs on into this
-    // one (a radio reading 2 KiB from the last sector of a file): no side effects. Optional.
+    /// The same bytes, for a read that started in the file before and only runs on into this
+    /// one (a radio reading 2 KiB from the last sector of a file): no side effects. Optional.
     std::function<void(uint32_t off, uint8_t* dst, size_t n)> peek;
-    std::function<std::string()> long_name;                      // UTF-8, may change
-    uint32_t first_cluster = 0, clusters = 0;                    // set by FatVolume
+    /// UTF-8, may change
+    std::function<std::string()> long_name;
+    /// set by FatVolume
+    uint32_t first_cluster = 0, clusters = 0;
 };
 
+/// How the volume is laid out (from the usb.* settings).
 struct FatOptions {
     bool fat32 = true;
     uint32_t cluster_size = 32768;
     std::string label = "BLUETOOTH";
-    uint32_t partition_offset = 2048;     // 0 = no partition table ("superfloppy")
+    /// 0 = no partition table ("superfloppy")
+    uint32_t partition_offset = 2048;
     uint32_t volume_id = 0x1A2B3C4D;
-    bool dynamic_names = false;           // directory reads ask long_name() every time
-    // Free space before the first file and after the last. Hosts probe for other filesystems'
-    // signatures near the start and the end of a disk (Linux's blkid: ZFS, LVM, RAID, GPT
-    // backup); with the padding those probes read empty clusters instead of a live file.
+    /// directory reads ask long_name() every time
+    bool dynamic_names = false;
+    /// Free space before the first file and after the last. Hosts probe for other filesystems'
+    /// signatures near the start and the end of a disk (Linux's blkid: ZFS, LVM, RAID, GPT
+    /// backup); with the padding those probes read empty clusters instead of a live file.
     uint32_t pad_bytes = 4u << 20;
 };
 
+/// The volume: sectors computed from the file list when the host reads them.
 class FatVolume {
 public:
     FatVolume(std::vector<VirtualFile> files, const FatOptions& opt);
@@ -67,5 +76,6 @@ private:
     uint32_t root_start_, data_start_, part_sectors_;
     uint64_t total_sectors_;
     std::mutex overlay_mu_;
-    std::map<uint64_t, Bytes> overlay_;     // sectors the host wrote, kept in RAM
+    /// sectors the host wrote, kept in RAM
+    std::map<uint64_t, Bytes> overlay_;
 };

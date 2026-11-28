@@ -1,6 +1,7 @@
-// The other end of the cable, for tests: a USB host that talks Bulk-Only to our BulkOnly, and a
-// small FAT reader that walks the volume the way an embedded player (FatFs) does: MBR, boot
-// sector, root directory with long names, cluster chains through the FAT.
+/// @file
+/// The other end of the cable, for tests: a USB host that talks Bulk-Only to our BulkOnly, and a
+/// small FAT reader that walks the volume the way an embedded player (FatFs) does: MBR, boot
+/// sector, root directory with long names, cluster chains through the FAT.
 #pragma once
 
 #include "fat.h"
@@ -10,7 +11,9 @@
 #include <deque>
 #include <string>
 
+/// failed CHECKs so far
 extern int g_failures;
+/// Counts and prints a failure unless cond holds; the test goes on.
 #define CHECK(cond)                                                                        \
     do {                                                                                   \
         if (!(cond)) {                                                                     \
@@ -18,6 +21,7 @@ extern int g_failures;
             g_failures++;                                                                  \
         }                                                                                  \
     } while (0)
+/// CHECK(a == b), each side evaluated once.
 #define CHECK_EQ(a, b)                                                                     \
     do {                                                                                   \
         auto _a = (a);                                                                     \
@@ -28,7 +32,7 @@ extern int g_failures;
         }                                                                                  \
     } while (0)
 
-// A transport where the "host" queues what it sends and collects what the device writes.
+/// A transport where the "host" queues what it sends and collects what the device writes.
 struct LoopTransport : BulkTransport {
     std::deque<uint8_t> to_device;
     Bytes from_device;
@@ -48,10 +52,11 @@ struct LoopTransport : BulkTransport {
     bool pending_cbw = false;
 };
 
+/// A USB host on a LoopTransport: Bulk-Only commands in, replies out.
 class UsbHost {
 public:
     explicit UsbHost(ScsiDisk& disk) : bot_(disk, t_) {}
-    // Sends one command; returns the CSW status (0 passed) and fills data_in.
+    /// Sends one command; returns the CSW status (0 passed) and fills data_in.
     int command(const Bytes& cdb, uint32_t length, bool dir_in, Bytes& data_in,
                 const Bytes& data_out = {}) {
         uint8_t cbw[31] = {};
@@ -89,12 +94,13 @@ private:
     uint32_t tag_ = 0;
 };
 
+/// A directory entry, as FatReader found it.
 struct FoundFile {
     std::string short_name, long_name;
     uint32_t cluster = 0, size = 0;
 };
 
-// What an embedded player does with a stick: just enough FAT to find and read files.
+/// What an embedded player does with a stick: just enough FAT to find and read files.
 class FatReader {
 public:
     explicit FatReader(UsbHost& h) : h_(h) {}
@@ -163,10 +169,12 @@ public:
                     if (ch == 0 || ch == 0xFFFF) break;
                     part.push_back(ch);
                 }
-                lfn = part + lfn;     // entries come last part first
+                // entries come last part first
+                lfn = part + lfn;
                 continue;
             }
-            if (e[11] & 0x08) { lfn.clear(); continue; }   // volume label
+            // volume label
+            if (e[11] & 0x08) { lfn.clear(); continue; }
             FoundFile f;
             std::string base(reinterpret_cast<const char*>(e), 8), ext(reinterpret_cast<const char*>(e + 8), 3);
             while (!base.empty() && base.back() == ' ') base.pop_back();
@@ -185,13 +193,13 @@ public:
         return out;
     }
 
-    // count sectors from the file's sector `sector` on, straight off the disk (the files are
-    // contiguous): a read can run on past the file's end into the next one.
+    /// count sectors from the file's sector `sector` on, straight off the disk (the files are
+    /// contiguous): a read can run on past the file's end into the next one.
     Bytes read_sectors(const FoundFile& f, uint32_t sector, uint16_t count) {
         return h_.read10(uint32_t(cluster_lba(f.cluster)) + sector, count);
     }
 
-    // Reads [offset, offset+n) of a file by walking its chain, like f_lseek + f_read.
+    /// Reads [offset, offset+n) of a file by walking its chain, like f_lseek + f_read.
     Bytes read_file(const FoundFile& f, uint32_t offset, uint32_t n) {
         Bytes out;
         uint32_t csize = spc_ * 512;
