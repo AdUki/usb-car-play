@@ -102,25 +102,58 @@ core). A radio whose buffer is bigger than the cushion (likely at 200 ms) waits 
 clock, so there the phone is held to the Pi's clock instead. Lost Bluetooth packets are filled to their
 length, so the timeline stays exact (except with aptX, whose packets carry no RTP header to tell).
 
-The code in [`app/src`](app/src) is four boxes, and `main.cpp` wires them together:
+### The code
+
+The code in [`app/src`](app/src) is four boxes, and `main.cpp` builds them and wires them
+together. Each box has one way in:
 
 ```
-            PCM             chunks                file bytes
- Bluetooth ─────▶ LiveStream ─────▶ Player ◀───────────────▶ UsbDisk ◀──USB──▶ radio
-     ▲                 ▲ mute         │      reads, mount, unplug
-     └──── MediaControl: Next/Previous/Pause, track, delay
+        PHONE                                                      RADIO
+          ║ A2DP, AVRCP                                        USB ║
+   ┌──────╨──────┐                                         ┌───────╨──────┐
+   │  Bluetooth  │◀───────────── MediaControl ─────────┐   │   UsbDisk    │
+   └──────┬──────┘   command(), track(), set_delay()   │   └──┬────────▲──┘
+          │                                            │      │        │
+          │ PCM                                        │      │ reads, │ file
+          │                                            │      │ mount, │ bytes
+   ┌──────▼──────┐             chunks              ┌───┴──────▼──┐     │
+   │ LiveStream  │────────────────────────────────▶│   Player    │─────┘
+   │             │◀──────── mute, unmute ──────────│             │
+   └─────────────┘                                 └─────────────┘
 ```
 
-- **Bluetooth**: `bluez` (AVRCP, pairing, reconnects) and `a2dp` (the sink endpoints, decoded
-  by `codecs`: libsbc, fdk-aac, libfreeaptx). The Player sees it only as `MediaControl`.
-- **LiveStream** (`stream`): the phone's PCM corrected for clock drift (`drift`) and muted
-  around skips, encoded into WAV or MP3 chunks in a queue.
-- **Player** (`player`): the button logic and tags. `livefile` maps the file the radio plays
-  onto the live chunks.
-- **UsbDisk** (`usb_disk` → `scsi` → `fat`): FunctionFS and Bulk-Only, the SCSI commands, and
-  the FAT volume computed sector by sector. Each layer knows only the one below it.
+Inside the boxes (a nested item is owned by the one above it, *in italics* a thread of its own):
 
-The stick boots straight into these programs, without systemd: `btdisk-init` mounts what is
+- **main.cpp** reads the config (`/etc/btdisk.conf`, then `/boot/btdisk.txt` on the SD card,
+  editable on a PC) with `read_settings()` into Settings, then builds the four boxes and wires them.
+  - *tick thread*: `Player::tick()` once a second, plus the trace heartbeat
+- **Bluetooth**: Bluez, which implements MediaControl. *bus thread*: AVRCP, the pairing agent, reconnects
+  - A2dpSink. *reader thread*: one `MediaEndpoint1` per codec
+    - Decoder: SbcDecoder, AacDecoder or AptxDecoder
+- **LiveStream**: `write_pcm()` → Resampler → mute gate → Encoder → ChunkQueue
+  - PtsClock: the phone's clock, from the RTP timestamps
+  - RadioClock: the radio's clock, from the queue's read stats
+  - Encoder: WavEncoder or Mp3Encoder (lame)
+  - ChunkQueue
+  - *clock thread*: silence while the phone sends nothing
+- **Player**. *watch thread*: unmutes after Next/Previous
+  - LiveFileData: the file being played ↔ the live queue
+- **UsbDisk**. *main thread*: ep0, binds the USB controller
+  - BulkOnly over EpTransport. *bot thread*
+    - ScsiDisk
+      - FatVolume: calls VirtualFile's read / peek / long_name, which land in the Player
+
+Every layer under UsbDisk knows only the one below it. FatVolume reaches the Player only
+through the callbacks in each VirtualFile, so the storage side never includes a player header.
+
+The files, box by box: Bluetooth is `bluez`, `a2dp` and `codecs` (libsbc, fdk-aac,
+libfreeaptx). LiveStream is `stream` and `drift`. Player is `player`, `livefile` and `formats`
+(the WAV, ID3 and MP3 headers). UsbDisk is `usb_disk`, `scsi` and `fat`. The settings are
+`config` and `settings`.
+
+### Booting
+
+The stick boots straight into btdisk and bluetoothd, without systemd: `btdisk-init` mounts what is
 needed, sets up the USB gadget and starts btdisk, then D-Bus and bluetoothd, and restarts any
 of them that exits. On the bench (systemd image before it: about 22 s) the
 phone connected about 8 s after power-on. The kernel is cut down for this too (LZ4, no
