@@ -7,11 +7,14 @@
 #include "livefile.h"
 #include "player.h"
 #include "formats.h"
+#include "settings.h"
 #include "stream.h"
 
 #include <algorithm>
 #include <cmath>
 #include <condition_variable>
+#include <cstdlib>
+#include <fstream>
 #include <mutex>
 #include <thread>
 #include <unistd.h>
@@ -88,6 +91,59 @@ struct FakePhone : MediaControl {
     std::vector<double> delays;   // set_delay()'s, in seconds
     void set_delay(double ms) override { std::lock_guard<std::mutex> lk(mu); delays.push_back(ms / 1000); }
 };
+
+static bool contains(const std::vector<std::string>& v, const std::string& part) {
+    for (auto& s : v)
+        if (s.find(part) != std::string::npos) return true;
+    return false;
+}
+
+// The settings: the image's file, then the SD card's on top, edited by hand on a PC.
+static void test_config() {
+    char dir[] = "/tmp/btdisk-test-XXXXXX";
+    CHECK(mkdtemp(dir) != nullptr);
+    std::string base = std::string(dir) + "/btdisk.conf", card = std::string(dir) + "/btdisk.txt";
+    std::ofstream(base) << "[audio]\nformat = mp3\nmp3_kbps = 256\n[player]\nautoplay = false\n";
+    // Notepad: a BOM and CRLF. A typo, a value with a unit, junk, a section without its ].
+    std::ofstream(card) << "\xEF\xBB\xBF# edited on a PC\r\n[audio]\r\nformat = wav\r\n"
+                           "[player]\r\nautoplay = yes\r\nguard_s = 6s\r\nthis is junk\r\n"
+                           "tags = both\r\n[bluetooth\r\nautoplya = true\r\n";
+    Config c;
+    CHECK(c.load(base));
+    CHECK(c.load(card));
+    CHECK(!c.load(std::string(dir) + "/missing.txt"));
+    Settings s = read_settings(c);
+    CHECK_EQ(s.player.format, std::string("wav"));          // the card wins
+    CHECK_EQ(s.stream.format, std::string("wav"));
+    CHECK_EQ(s.stream.mp3_kbps, 256);                       // what only the image's file says
+    CHECK(s.player.autoplay);
+    CHECK_EQ(s.player.guard_s, 6.0);                        // "6s": the default
+    CHECK_EQ(s.player.tags, std::string("phone"));          // "both": the default
+    CHECK(contains(c.changes(), "audio.format = wav (was mp3)"));
+    CHECK(contains(c.changes(), "player.autoplay = yes (was false)"));
+    CHECK(contains(c.warnings(), card + ":6: player.guard_s = 6s: not a number"));
+    CHECK(contains(c.warnings(), card + ":7: not key = value"));
+    CHECK(contains(c.warnings(), card + ":8: player.tags = both: must be phone or track"));
+    CHECK(contains(c.warnings(), card + ":9: no ]"));
+    std::vector<std::string> unknown = c.unknown_keys();
+    CHECK_EQ(unknown.size(), size_t(1));
+    CHECK(contains(unknown, "player.autoplya (" + card + ":10)"));
+    CHECK_EQ(c.num("player.guard_s", 3), 3L);
+    CHECK_EQ(c.flag("player.autoplay", false), true);
+    unlink(base.c_str());
+    unlink(card.c_str());
+    rmdir(dir);
+
+    // The file the image ships (and puts on the card): every key in it is one btdisk reads, and
+    // every value one it takes.
+    Config shipped;
+    CHECK(shipped.load(BTDISK_CONF));
+    Settings d = read_settings(shipped);
+    for (auto& k : shipped.unknown_keys()) fprintf(stderr, "FAIL btdisk.conf: unknown key %s\n", k.c_str());
+    for (auto& w : shipped.warnings()) fprintf(stderr, "FAIL btdisk.conf: %s\n", w.c_str());
+    CHECK(shipped.unknown_keys().empty() && shipped.warnings().empty());
+    CHECK_EQ(d.player.format, std::string("mp3"));
+}
 
 static void test_formats() {
     CHECK_EQ(to_latin1("Žltý kôň", Charset::Latin1), std::string("Zlt\xFD k\xF4n"));
@@ -997,6 +1053,7 @@ int main(int argc, char** argv) {
     g_log_level = 0;
     std::string what = argc > 1 ? argv[1] : "--all";
     if (what == "--unit" || what == "--all") {
+        test_config();
         test_formats();
         for (bool f32 : {true, false})
             for (uint32_t part : {2048u, 0u})
