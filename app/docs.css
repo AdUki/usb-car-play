@@ -1,0 +1,8 @@
+/* make docs: the README's box drawings in a font that has every glyph they use (doxygen's
+ * first pick, Ubuntu Mono, has no ▶◀▲▼, so those widen their line), with no gaps between lines
+ * and no wrapping. */
+div.fragment div.line {
+	font-family: 'DejaVu Sans Mono', Menlo, Consolas, monospace;
+	line-height: 1.15;
+	white-space: pre;
+}

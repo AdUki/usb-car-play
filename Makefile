@@ -85,6 +85,10 @@ check-image: build ## The virtual disk (FAT32 and FAT16) checked by fsck.fat and
 	done
 
 .PHONY: clean
+.PHONY: docs
+docs: ## The API docs from the headers' /// comments, in app/build/docs/html (needs doxygen)
+	@cd $(APP) && doxygen Doxyfile && echo "$(APP)/build/docs/html/index.html"
+
 clean: ## Remove the local builds (FULL=1 also the Yocto tmp)
 	@rm -rf $(BUILD) $(APP)/build-*
 ifdef FULL

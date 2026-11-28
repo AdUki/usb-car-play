@@ -1,0 +1,16 @@
+# The API docs from the headers' /// comments, with README.md as the main page: make docs, then open app/build/docs/html/index.html.
+# Everything not set here is doxygen's default.
+PROJECT_NAME           = btdisk
+OUTPUT_DIRECTORY       = build/docs
+INPUT                  = ../README.md src tests/host.h
+FILE_PATTERNS          = *.h
+USE_MDFILE_AS_MAINPAGE = ../README.md
+EXTRACT_ALL            = YES
+EXTRACT_PRIVATE        = YES
+EXTRACT_STATIC         = YES
+JAVADOC_AUTOBRIEF      = YES
+SOURCE_BROWSER         = YES
+HTML_EXTRA_STYLESHEET  = docs.css
+GENERATE_LATEX         = NO
+QUIET                  = YES
+WARN_IF_UNDOCUMENTED   = NO
