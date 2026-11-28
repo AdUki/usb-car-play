@@ -1,0 +1,49 @@
+# btdisk's C++ style: make format applies it (and tools/comment-spacing.awk).
+#
+# Tabs indent the blocks; a wrapped if (...), argument list or initializer list continues with
+# spaces after those tabs. Functions, classes, structs, unions and enums open their brace on a
+# new line; control statements, namespaces and lambdas keep it on the same line.
+BasedOnStyle: LLVM
+ColumnLimit: 100
+IndentWidth: 4
+TabWidth: 4
+UseTab: ForIndentation
+ContinuationIndentWidth: 4
+AccessModifierOffset: -4
+IndentCaseLabels: false
+PointerAlignment: Left
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterClass: true
+  AfterStruct: true
+  AfterUnion: true
+  AfterEnum: true
+  AfterFunction: true
+  AfterNamespace: false
+  AfterControlStatement: Never
+  AfterCaseLabel: false
+  AfterExternBlock: false
+  BeforeCatch: false
+  BeforeElse: false
+  BeforeLambdaBody: false
+  BeforeWhile: false
+  SplitEmptyFunction: false
+  SplitEmptyRecord: false
+  SplitEmptyNamespace: false
+AllowShortFunctionsOnASingleLine: InlineOnly
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: true
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortBlocksOnASingleLine: Empty
+AllowShortLambdasOnASingleLine: All
+AllowShortEnumsOnASingleLine: false
+AlwaysBreakTemplateDeclarations: Yes
+SpacesBeforeTrailingComments: 2
+AlignTrailingComments:
+  Kind: Always
+  OverEmptyLines: 0
+FixNamespaceComments: true
+IncludeBlocks: Preserve
+SortIncludes: CaseSensitive
+MaxEmptyLinesToKeep: 1
+KeepEmptyLinesAtTheStartOfBlocks: false

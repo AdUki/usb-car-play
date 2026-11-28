@@ -84,6 +84,17 @@ check-image: build ## The virtual disk (FAT32 and FAT16) checked by fsck.fat and
 	  7z l $(SCRATCH)/$$fat-part.img | sed -n '/^----/,/^----/p' | sed -n '2,4p'; \
 	done
 
+# The style is in .clang-format (clang-format 18: sudo apt install clang-format, or pip install
+# clang-format). The awk script adds the blank lines before comment blocks that clang-format can't.
+CLANG_FORMAT ?= clang-format
+FORMAT_SRC    = $(wildcard $(APP)/src/*.cpp $(APP)/src/*.h $(APP)/tests/*.cpp $(APP)/tests/*.h $(APP)/tools/*.cpp)
+
+.PHONY: format
+format: ## Format the C++ sources in place (.clang-format; CLANG_FORMAT=path)
+	@for f in $(FORMAT_SRC); do awk -f tools/comment-spacing.awk $$f > $$f.fmt && \
+	  { cmp -s $$f $$f.fmt && rm $$f.fmt || mv $$f.fmt $$f; }; done
+	@$(CLANG_FORMAT) -i $(FORMAT_SRC)
+
 .PHONY: clean
 .PHONY: docs
 docs: ## The API docs from the headers' /// comments, in app/build/docs/html (needs doxygen)
