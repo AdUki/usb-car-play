@@ -449,8 +449,9 @@ void Bluez::on_props(const std::string& path, const std::string& iface, sd_bus_m
 		{
 			std::lock_guard<std::mutex> lk(p_mu);
 			p_transports.insert(path);
-			auto d = p_devices.find(path.substr(0, path.rfind('/')));
-			if (d != p_devices.end()) d->second.had_audio = true;
+			// dev_X/fdN, or dev_X/sepN/fdN under the phone's endpoint
+			for (auto& [dev, d] : p_devices)
+				if (path.compare(0, dev.size() + 1, dev + "/") == 0) d.had_audio = true;
 		}
 		if (p_a2dp)
 			p_a2dp->on_transport_props(p_bus, path, m);
