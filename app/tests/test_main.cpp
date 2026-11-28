@@ -949,7 +949,7 @@ static void test_a2dp() {
     // A lost packet is filled to its length: the timeline (2 s of 640-frame packets) comes out
     // whole, found by the RTP timestamps or, without them, by the sequence numbers.
     // (Less the resampler's look-ahead, in the WAV encoder's whole chunks of 1152 frames.)
-    const size_t whole = (2 * 44100 / 640 * 640 - Resampler::kTaps / 2) / 1152 * 1152;
+    const size_t whole = (2 * 44100 / 640 * 640 - Resampler::delay_frames()) / 1152 * 1152;
     for (bool ts : {true, false}) {
         CHECK_EQ(a2dp_roundtrip(Codec::Sbc, sbc, 127, -1, ts).left.size(), whole);
         CHECK_EQ(a2dp_roundtrip(Codec::Sbc, sbc, 127, 30, ts).left.size(), whole);

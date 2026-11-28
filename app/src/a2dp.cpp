@@ -15,62 +15,63 @@ namespace {
 const char* kEndpointDir = "/btdisk/a2dp/";
 const char* kA2dpSinkUuid = "0000110b-0000-1000-8000-00805f9b34fb";
 
-int ep_select(sd_bus_message* m, void* ud, sd_bus_error*) {
-    auto* ep = static_cast<A2dpSink::Endpoint*>(ud);
-    return ep->sink->select_configuration(*ep->codec, m);
-}
-int ep_set(sd_bus_message* m, void* ud, sd_bus_error*) {
-    auto* ep = static_cast<A2dpSink::Endpoint*>(ud);
-    return ep->sink->set_configuration(*ep->codec, m);
-}
-int ep_clear(sd_bus_message* m, void* ud, sd_bus_error*) {
-    return static_cast<A2dpSink::Endpoint*>(ud)->sink->clear_configuration(m);
-}
 int ep_release(sd_bus_message* m, void*, sd_bus_error*) { return sd_bus_reply_method_return(m, ""); }
 
-const sd_bus_vtable kEndpointVtable[] = {
-    SD_BUS_VTABLE_START(0),
-    SD_BUS_METHOD("SelectConfiguration", "ay", "ay", ep_select, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("SetConfiguration", "oa{sv}", "", ep_set, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("ClearConfiguration", "o", "", ep_clear, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("Release", "", "", ep_release, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_VTABLE_END};
-
-struct AcquireCtx {
+// What an async call's reply needs to find its way back.
+struct ReplyCtx {
     A2dpSink* sink;
     std::string path;
 };
-
-int on_acquire_reply(sd_bus_message* m, void* ud, sd_bus_error*) {
-    auto* ctx = static_cast<AcquireCtx*>(ud);
-    const sd_bus_error* e = sd_bus_message_get_error(m);
-    if (e) {
-        LOGW("a2dp: acquire %s failed: %s", ctx->path.c_str(), e->message ? e->message : e->name);
-    } else {
-        int fd = -1;
-        uint16_t rmtu = 0, wmtu = 0;
-        if (sd_bus_message_read(m, "hqq", &fd, &rmtu, &wmtu) >= 0 && fd >= 0)
-            ctx->sink->acquired(sd_bus_message_get_bus(m), ctx->path,
-                                fcntl(fd, F_DUPFD_CLOEXEC, 3), rmtu);
-    }
-    delete ctx;
-    return 0;
-}
-
-struct DelayCtx {
-    A2dpSink* sink;
-    std::string path;
-};
-
-int on_delay_reply(sd_bus_message* m, void* ud, sd_bus_error*) {
-    auto* ctx = static_cast<DelayCtx*>(ud);
-    const sd_bus_error* e = sd_bus_message_get_error(m);
-    ctx->sink->delay_reported(ctx->path, e ? (e->message ? e->message : e->name) : nullptr);
-    delete ctx;
-    return 0;
-}
 
 }  // namespace
+
+// The C callbacks sd-bus calls, into A2dpSink's private handlers. An endpoint's userdata is its
+// Endpoint, an async reply's a ReplyCtx.
+struct A2dpSink::Bus {
+    static int select(sd_bus_message* m, void* ud, sd_bus_error*) {
+        auto* ep = static_cast<Endpoint*>(ud);
+        return ep->sink->select_configuration(*ep->codec, m);
+    }
+    static int set(sd_bus_message* m, void* ud, sd_bus_error*) {
+        auto* ep = static_cast<Endpoint*>(ud);
+        return ep->sink->set_configuration(*ep->codec, m);
+    }
+    static int clear(sd_bus_message* m, void* ud, sd_bus_error*) {
+        return static_cast<Endpoint*>(ud)->sink->clear_configuration(m);
+    }
+
+    static constexpr sd_bus_vtable endpoint_vtable[] = {
+        SD_BUS_VTABLE_START(0),
+        SD_BUS_METHOD("SelectConfiguration", "ay", "ay", select, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("SetConfiguration", "oa{sv}", "", set, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("ClearConfiguration", "o", "", clear, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("Release", "", "", ep_release, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_VTABLE_END};
+
+    static int acquire_reply(sd_bus_message* m, void* ud, sd_bus_error*) {
+        auto* ctx = static_cast<ReplyCtx*>(ud);
+        const sd_bus_error* e = sd_bus_message_get_error(m);
+        if (e) {
+            LOGW("a2dp: acquire %s failed: %s", ctx->path.c_str(), e->message ? e->message : e->name);
+        } else {
+            int fd = -1;
+            uint16_t rmtu = 0, wmtu = 0;
+            if (sd_bus_message_read(m, "hqq", &fd, &rmtu, &wmtu) >= 0 && fd >= 0)
+                ctx->sink->acquired(sd_bus_message_get_bus(m), ctx->path,
+                                    fcntl(fd, F_DUPFD_CLOEXEC, 3), rmtu);
+        }
+        delete ctx;
+        return 0;
+    }
+
+    static int delay_reply(sd_bus_message* m, void* ud, sd_bus_error*) {
+        auto* ctx = static_cast<ReplyCtx*>(ud);
+        const sd_bus_error* e = sd_bus_message_get_error(m);
+        ctx->sink->delay_reported(ctx->path, e ? (e->message ? e->message : e->name) : nullptr);
+        delete ctx;
+        return 0;
+    }
+};
 
 A2dpSink::A2dpSink(LiveStream& stream, bool apply_volume, int rt_priority, int delay_ms,
                    std::vector<const CodecInfo*> codecs)
@@ -90,7 +91,7 @@ void A2dpSink::register_endpoint(sd_bus* bus, const std::string& adapter) {
     for (auto& ep : endpoints_) {
         if (!registered_)
             sd_bus_add_object_vtable(bus, nullptr, ep->path.c_str(), "org.bluez.MediaEndpoint1",
-                                     kEndpointVtable, ep.get());
+                                     Bus::endpoint_vtable, ep.get());
         sd_bus_message *m = nullptr, *reply = nullptr;
         sd_bus_error err = SD_BUS_ERROR_NULL;
         sd_bus_message_new_method_call(bus, &m, "org.bluez", adapter.c_str(), "org.bluez.Media1",
@@ -181,9 +182,9 @@ int A2dpSink::set_configuration(const CodecInfo& c, sd_bus_message* m) {
 
 void A2dpSink::report_delay(sd_bus* bus, const std::string& path, uint16_t delay) {
     if (!delay) return;
-    auto* ctx = new DelayCtx{this, path};
+    auto* ctx = new ReplyCtx{this, path};
     int r = sd_bus_call_method_async(bus, nullptr, "org.bluez", path.c_str(),
-                                     "org.freedesktop.DBus.Properties", "Set", on_delay_reply, ctx,
+                                     "org.freedesktop.DBus.Properties", "Set", Bus::delay_reply, ctx,
                                      "ssv", "org.bluez.MediaTransport1", "Delay", "q", delay);
     if (r < 0) {
         delete ctx;
@@ -278,9 +279,9 @@ void A2dpSink::on_transport_props(sd_bus* bus, const std::string& path, sd_bus_m
 }
 
 void A2dpSink::acquire(sd_bus* bus, const std::string& path) {
-    auto* ctx = new AcquireCtx{this, path};
+    auto* ctx = new ReplyCtx{this, path};
     int r = sd_bus_call_method_async(bus, nullptr, "org.bluez", path.c_str(),
-                                     "org.bluez.MediaTransport1", "TryAcquire", on_acquire_reply,
+                                     "org.bluez.MediaTransport1", "TryAcquire", Bus::acquire_reply,
                                      ctx, "");
     if (r < 0) {
         delete ctx;

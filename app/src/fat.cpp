@@ -107,11 +107,6 @@ FatVolume::FatVolume(std::vector<VirtualFile> files, const FatOptions& opt)
     total_sectors_ = uint64_t(opt.partition_offset) + part_sectors_;
 }
 
-std::pair<uint64_t, uint64_t> FatVolume::file_lbas(size_t i) const {
-    const auto& f = files_[i];
-    uint64_t s = data_lba() + uint64_t(f.first_cluster - 2) * spc_;
-    return {s, s + uint64_t(f.clusters) * spc_};
-}
 
 void FatVolume::mbr(uint8_t* s) const {
     memset(s, 0, kSector);

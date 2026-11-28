@@ -28,7 +28,6 @@ public:
     void reset();                                  // a new stream: keeps the last estimate
     void update(uint64_t position, double arrival);
     double ppm() const { return ppm_; }            // + = the phone's clock runs fast
-    double error_ppm() const { return error_ppm_; }  // standard error of the last fit
     bool valid() const { return valid_; }
 
 private:
@@ -37,7 +36,7 @@ private:
     bool in_window_ = false;
     double win_start_ = 0, win_min_ = 0, win_t_ = 0, t0_ = 0;
     std::deque<std::pair<double, double>> mins_;   // (time, minimum delay) per window
-    double ppm_ = 0, error_ppm_ = 0;
+    double ppm_ = 0, error_ppm_ = 0;               // error: the last fit's standard error
     bool valid_ = false;
 };
 
@@ -84,9 +83,10 @@ public:
     // appends the result to out.
     void process(const int16_t* in, size_t frames, double ratio, std::vector<int16_t>& out);
     void reset();
-    static constexpr int kTaps = 48;               // also the delay: kTaps / 2 frames
+    static constexpr int delay_frames() { return kTaps / 2; }   // input to output
 
 private:
+    static constexpr int kTaps = 48;
     static constexpr int kPhases = 256;
     int ch_;
     std::vector<float> coef_;                      // kPhases rows of kTaps

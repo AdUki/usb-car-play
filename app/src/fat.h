@@ -49,10 +49,6 @@ public:
     void write(uint64_t lba, const uint8_t* data, uint32_t count);
 
     const std::vector<VirtualFile>& files() const { return files_; }
-    // First and one-past-last LBA of a file's clusters (tests, diagnostics).
-    std::pair<uint64_t, uint64_t> file_lbas(size_t i) const;
-    uint32_t partition_offset() const { return opt_.partition_offset; }
-    uint64_t data_lba() const { return opt_.partition_offset + data_start_; }
 
 private:
     uint32_t read_run(uint64_t lba, uint32_t max, uint8_t* out, int& first_file);

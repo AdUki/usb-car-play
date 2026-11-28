@@ -43,7 +43,8 @@ public:
     void command(const std::string& cmd) override;
     std::string phone_name() override;
 
-    // Used by the sd-bus callbacks.
+private:
+    struct Bus;                             // the sd-bus callbacks (bluez.cpp)
     void on_props(const std::string& path, const std::string& iface, sd_bus_message* m);
     void on_removed(const std::string& path, const std::string& iface);
     void on_connect_reply(const std::string& path, sd_bus_message* reply);
@@ -52,7 +53,6 @@ public:
     void loop_event(bool tick);
     void bluez_owner_changed(bool present);
 
-private:
     struct Device {
         std::string address, name;
         bool connected = false, paired = false, trusted = false;

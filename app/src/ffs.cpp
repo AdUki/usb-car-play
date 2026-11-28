@@ -124,12 +124,11 @@ void FunctionFs::start() {
 void FunctionFs::bot_loop() {
     EpTransport t(ep_in_, ep_out_);
     BulkOnly bot(disk_, t);
-    while (!stop_) {
+    for (;;) {
         {
             std::unique_lock<std::mutex> lk(mu_);
-            cv_.wait(lk, [&] { return enabled_ || stop_; });
+            cv_.wait(lk, [&] { return enabled_; });
         }
-        if (stop_) break;
         if (!bot.serve_one()) {
             // ESHUTDOWN or ECONNRESET: the host went away or reset us; wait for the next enable.
             LOGD("bulk endpoints: %s", strerror(errno));
@@ -140,7 +139,7 @@ void FunctionFs::bot_loop() {
 
 void FunctionFs::run_ep0() {
     uint8_t buf[sizeof(usb_functionfs_event) * 4];
-    while (!stop_) {
+    for (;;) {
         ssize_t n = ::read(ep0_, buf, sizeof buf);
         if (n < 0) {
             if (errno == EINTR) continue;
@@ -167,7 +166,6 @@ void FunctionFs::event(const uint8_t* raw) {
             enabled_ = true;
         }
         cv_.notify_all();
-        if (on_enable) on_enable();
         break;
     }
     case FUNCTIONFS_DISABLE:

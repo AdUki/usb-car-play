@@ -88,34 +88,6 @@ TrackInfo read_track(sd_bus_message* m) {
     return t;
 }
 
-int on_properties_changed(sd_bus_message* m, void* ud, sd_bus_error*) {
-    const char* iface = nullptr;
-    sd_bus_message_read_basic(m, 's', &iface);
-    const char* path = sd_bus_message_get_path(m);
-    static_cast<Bluez*>(ud)->on_props(path ? path : "", iface ? iface : "", m);
-    return 0;
-}
-
-int on_interfaces_added(sd_bus_message* m, void* ud, sd_bus_error*) {
-    const char* path = nullptr;
-    sd_bus_message_read_basic(m, 'o', &path);
-    static_cast<Bluez*>(ud)->handle_interfaces(path ? path : "", m);
-    return 0;
-}
-
-int on_interfaces_removed(sd_bus_message* m, void* ud, sd_bus_error*) {
-    const char* path = nullptr;
-    char** ifaces = nullptr;
-    sd_bus_message_read_basic(m, 'o', &path);
-    sd_bus_message_read_strv(m, &ifaces);
-    for (char** i = ifaces; i && *i; i++) {
-        static_cast<Bluez*>(ud)->on_removed(path ? path : "", *i);
-        free(*i);
-    }
-    free(ifaces);
-    return 0;
-}
-
 // ----------------------------------------------------------------- the pairing agent
 
 int agent_ok(sd_bus_message* m, void*, sd_bus_error*) { return sd_bus_reply_method_return(m, ""); }
@@ -124,31 +96,84 @@ int agent_pin(sd_bus_message* m, void*, sd_bus_error*) { return sd_bus_reply_met
 
 int agent_passkey(sd_bus_message* m, void*, sd_bus_error*) { return sd_bus_reply_method_return(m, "u", 0u); }
 
-int agent_accept(sd_bus_message* m, void* ud, sd_bus_error*) {
-    const char* dev = nullptr;
-    sd_bus_message_read_basic(m, 'o', &dev);
-    LOGI("bluetooth: accepting %s", dev ? dev : "?");
-    if (dev) static_cast<Bluez*>(ud)->trust(dev);
-    return sd_bus_reply_method_return(m, "");
-}
-
-const sd_bus_vtable kAgentVtable[] = {
-    SD_BUS_VTABLE_START(0),
-    SD_BUS_METHOD("Release", "", "", agent_ok, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("RequestPinCode", "o", "s", agent_pin, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("DisplayPinCode", "os", "", agent_ok, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("RequestPasskey", "o", "u", agent_passkey, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("DisplayPasskey", "ouq", "", agent_ok, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("RequestConfirmation", "ou", "", agent_accept, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("RequestAuthorization", "o", "", agent_accept, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("AuthorizeService", "os", "", agent_ok, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("Cancel", "", "", agent_ok, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_VTABLE_END};
-
-int on_wake(sd_event_source*, int fd, uint32_t, void* ud);
-int on_timer(sd_event_source* s, uint64_t usec, void* ud);
-
 }  // namespace
+
+// ----------------------------------------------------------------- sd-bus callbacks
+
+// The C callbacks sd-bus calls (userdata: the Bluez), into Bluez's private handlers.
+struct Bluez::Bus {
+    static int properties_changed(sd_bus_message* m, void* ud, sd_bus_error*) {
+        const char* iface = nullptr;
+        sd_bus_message_read_basic(m, 's', &iface);
+        const char* path = sd_bus_message_get_path(m);
+        static_cast<Bluez*>(ud)->on_props(path ? path : "", iface ? iface : "", m);
+        return 0;
+    }
+
+    static int interfaces_added(sd_bus_message* m, void* ud, sd_bus_error*) {
+        const char* path = nullptr;
+        sd_bus_message_read_basic(m, 'o', &path);
+        static_cast<Bluez*>(ud)->handle_interfaces(path ? path : "", m);
+        return 0;
+    }
+
+    static int interfaces_removed(sd_bus_message* m, void* ud, sd_bus_error*) {
+        const char* path = nullptr;
+        char** ifaces = nullptr;
+        sd_bus_message_read_basic(m, 'o', &path);
+        sd_bus_message_read_strv(m, &ifaces);
+        for (char** i = ifaces; i && *i; i++) {
+            static_cast<Bluez*>(ud)->on_removed(path ? path : "", *i);
+            free(*i);
+        }
+        free(ifaces);
+        return 0;
+    }
+
+    static int agent_accept(sd_bus_message* m, void* ud, sd_bus_error*) {
+        const char* dev = nullptr;
+        sd_bus_message_read_basic(m, 'o', &dev);
+        LOGI("bluetooth: accepting %s", dev ? dev : "?");
+        if (dev) static_cast<Bluez*>(ud)->trust(dev);
+        return sd_bus_reply_method_return(m, "");
+    }
+
+    static int wake(sd_event_source*, int fd, uint32_t, void* ud) {
+        uint64_t v;
+        if (read(fd, &v, 8) < 0) {}
+        static_cast<Bluez*>(ud)->loop_event(false);
+        return 0;
+    }
+
+    static int timer(sd_event_source* s, uint64_t usec, void* ud) {
+        static_cast<Bluez*>(ud)->loop_event(true);
+        sd_event_source_set_time(s, usec + 1000000);
+        sd_event_source_set_enabled(s, SD_EVENT_ON);
+        return 0;
+    }
+
+    static int name_owner(sd_bus_message* m, void* ud, sd_bus_error*) {
+        const char *name = nullptr, *old_owner = nullptr, *new_owner = nullptr;
+        sd_bus_message_read(m, "sss", &name, &old_owner, &new_owner);
+        static_cast<Bluez*>(ud)->bluez_owner_changed(new_owner && *new_owner);
+        return 0;
+    }
+
+    static int connect_reply(sd_bus_message* m, void* ud, sd_bus_error*);
+
+    static constexpr sd_bus_vtable agent_vtable[] = {
+        SD_BUS_VTABLE_START(0),
+        SD_BUS_METHOD("Release", "", "", agent_ok, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("RequestPinCode", "o", "s", agent_pin, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("DisplayPinCode", "os", "", agent_ok, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("RequestPasskey", "o", "u", agent_passkey, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("DisplayPasskey", "ouq", "", agent_ok, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("RequestConfirmation", "ou", "", agent_accept, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("RequestAuthorization", "o", "", agent_accept, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("AuthorizeService", "os", "", agent_ok, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("Cancel", "", "", agent_ok, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_VTABLE_END};
+};
 
 // ----------------------------------------------------------------- Bluez
 
@@ -169,27 +194,6 @@ Bluez::~Bluez() {
 
 void Bluez::start() { thread_ = std::thread([this] { loop(); }); }
 
-namespace {
-int on_wake(sd_event_source*, int fd, uint32_t, void* ud) {
-    uint64_t v;
-    if (read(fd, &v, 8) < 0) {}
-    static_cast<Bluez*>(ud)->loop_event(false);
-    return 0;
-}
-int on_timer(sd_event_source* s, uint64_t usec, void* ud) {
-    static_cast<Bluez*>(ud)->loop_event(true);
-    sd_event_source_set_time(s, usec + 1000000);
-    sd_event_source_set_enabled(s, SD_EVENT_ON);
-    return 0;
-}
-int on_name_owner(sd_bus_message* m, void* ud, sd_bus_error*) {
-    const char *name = nullptr, *old_owner = nullptr, *new_owner = nullptr;
-    sd_bus_message_read(m, "sss", &name, &old_owner, &new_owner);
-    static_cast<Bluez*>(ud)->bluez_owner_changed(new_owner && *new_owner);
-    return 0;
-}
-}  // namespace
-
 void Bluez::loop() {
     // btdisk starts before D-Bus and bluetoothd so that the radio sees the stick as early as
     // possible: wait for the bus here, and for BlueZ through NameOwnerChanged.
@@ -202,20 +206,20 @@ void Bluez::loop() {
     sd_event_new(&event_);
     sd_bus_attach_event(bus_, event_, 0);
     sd_bus_match_signal(bus_, nullptr, kBluez, nullptr, "org.freedesktop.DBus.Properties",
-                        "PropertiesChanged", on_properties_changed, this);
+                        "PropertiesChanged", Bus::properties_changed, this);
     sd_bus_match_signal(bus_, nullptr, kBluez, "/", "org.freedesktop.DBus.ObjectManager",
-                        "InterfacesAdded", on_interfaces_added, this);
+                        "InterfacesAdded", Bus::interfaces_added, this);
     sd_bus_match_signal(bus_, nullptr, kBluez, "/", "org.freedesktop.DBus.ObjectManager",
-                        "InterfacesRemoved", on_interfaces_removed, this);
+                        "InterfacesRemoved", Bus::interfaces_removed, this);
     sd_bus_add_match(bus_, nullptr,
                      "type='signal',sender='org.freedesktop.DBus',member='NameOwnerChanged',"
-                     "arg0='org.bluez'", on_name_owner, this);
+                     "arg0='org.bluez'", Bus::name_owner, this);
     if (opt_.agent)
-        sd_bus_add_object_vtable(bus_, nullptr, kAgentPath, "org.bluez.Agent1", kAgentVtable, this);
-    sd_event_add_io(event_, nullptr, wake_fd_, EPOLLIN, on_wake, this);
+        sd_bus_add_object_vtable(bus_, nullptr, kAgentPath, "org.bluez.Agent1", Bus::agent_vtable, this);
+    sd_event_add_io(event_, nullptr, wake_fd_, EPOLLIN, Bus::wake, this);
     uint64_t now;
     sd_event_now(event_, CLOCK_MONOTONIC, &now);
-    sd_event_add_time(event_, nullptr, CLOCK_MONOTONIC, now + 2000000, 0, on_timer, this);
+    sd_event_add_time(event_, nullptr, CLOCK_MONOTONIC, now + 2000000, 0, Bus::timer, this);
     bluez_owner_changed(true);
     while (!quit_) {
         r = sd_event_run(event_, step_active_ ? 50000 : 1000000);
@@ -510,14 +514,12 @@ void Bluez::set_prop_async(const std::string& path, const char* iface, const cha
     sd_bus_message_unref(m);
 }
 
-namespace {
-int connect_reply(sd_bus_message* m, void* ud, sd_bus_error*) {
+int Bluez::Bus::connect_reply(sd_bus_message* m, void* ud, sd_bus_error*) {
     auto* ctx = static_cast<std::pair<Bluez*, std::string>*>(ud);
     ctx->first->on_connect_reply(ctx->second, m);
     delete ctx;
     return 0;
 }
-}  // namespace
 
 void Bluez::on_connect_reply(const std::string& path, sd_bus_message* reply) {
     connecting_ = false;
@@ -609,9 +611,9 @@ void Bluez::reconnect() {
     LOGI("bluetooth: %s %s", uuid ? "asking for A2DP from" : "calling", path.c_str());
     auto* ctx = new std::pair<Bluez*, std::string>(this, path);
     int r = uuid ? sd_bus_call_method_async(bus_, nullptr, kBluez, path.c_str(), "org.bluez.Device1",
-                                            method, connect_reply, ctx, "s", uuid)
+                                            method, Bus::connect_reply, ctx, "s", uuid)
                  : sd_bus_call_method_async(bus_, nullptr, kBluez, path.c_str(), "org.bluez.Device1",
-                                            method, connect_reply, ctx, "");
+                                            method, Bus::connect_reply, ctx, "");
     if (r < 0) delete ctx;
     else connecting_ = true;
 }

@@ -19,10 +19,9 @@ public:
     ~FunctionFs();
 
     void start();       // descriptors + strings to ep0, opens the endpoints, starts Bulk-Only
-    void run_ep0();     // handles ep0 events until stop()
-    void stop() { stop_ = true; }
+    void run_ep0();     // handles ep0 events, never returns
 
-    std::function<void()> on_enable, on_disable;
+    std::function<void()> on_disable;
 
 private:
     void bot_loop();
@@ -32,7 +31,6 @@ private:
     std::string mount_;
     ScsiDisk& disk_;
     int ep0_ = -1, ep_in_ = -1, ep_out_ = -1;
-    std::atomic<bool> stop_{false};
     std::mutex mu_;
     std::condition_variable cv_;
     bool enabled_ = false;

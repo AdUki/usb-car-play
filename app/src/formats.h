@@ -22,7 +22,6 @@ struct TrackInfo {
 enum class Charset { Latin1, Ascii, Unicode };
 Charset parse_charset(const std::string& s);
 
-std::u32string utf8_decode(const std::string& s);
 std::string to_latin1(const std::string& utf8, Charset cs);          // Latin-1 bytes
 std::u16string to_ucs2(const std::string& utf8, Charset cs);         // BMP only
 

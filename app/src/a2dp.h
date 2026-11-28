@@ -30,29 +30,16 @@ public:
              std::vector<const CodecInfo*> codecs = {});
     ~A2dpSink();
 
-    // All of these run on the BlueZ event loop thread.
+    // Called by Bluez on its bus thread.
     void register_endpoint(sd_bus* bus, const std::string& adapter);
     void on_transport_props(sd_bus* bus, const std::string& path, sd_bus_message* m);
     void on_transport_removed(const std::string& path);
     void reset();   // bluetoothd went away
+    void apply_delay(sd_bus* bus);   // sends set_delay()'s
 
-    // MediaEndpoint1 methods (called by sd-bus), for the endpoint of codec c.
-    int select_configuration(const CodecInfo& c, sd_bus_message* m);
-    int set_configuration(const CodecInfo& c, sd_bus_message* m);
-    int clear_configuration(sd_bus_message* m);
-    void acquired(sd_bus* bus, const std::string& path, int fd, uint16_t read_mtu);
-    void delay_reported(const std::string& path, const char* error);   // the Set's reply
     // A new delay to report (any thread): the bus thread sends it in apply_delay(). Nothing
     // without delay reporting.
     void set_delay(double ms);
-    void apply_delay(sd_bus* bus);
-
-    // One registered MediaEndpoint1 object (the sd-bus callbacks' userdata).
-    struct Endpoint {
-        A2dpSink* sink;
-        const CodecInfo* codec;
-        std::string path;
-    };
 
     bool streaming() const { return streaming_; }
     uint64_t packets_lost() const { return lost_; }
@@ -63,6 +50,20 @@ public:
     void set_volume(int v) { volume_ = v; }
 
 private:
+    struct Bus;   // the sd-bus callbacks (a2dp.cpp)
+    // One registered MediaEndpoint1 object (the sd-bus callbacks' userdata).
+    struct Endpoint {
+        A2dpSink* sink;
+        const CodecInfo* codec;
+        std::string path;
+    };
+    // MediaEndpoint1 methods, for the endpoint of codec c.
+    int select_configuration(const CodecInfo& c, sd_bus_message* m);
+    int set_configuration(const CodecInfo& c, sd_bus_message* m);
+    int clear_configuration(sd_bus_message* m);
+    void acquired(sd_bus* bus, const std::string& path, int fd, uint16_t read_mtu);
+    void delay_reported(const std::string& path, const char* error);   // the Set's reply
+
     struct Transport {
         std::string state;
         Codec codec = Codec::Sbc;

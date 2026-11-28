@@ -14,7 +14,7 @@ Charset parse_charset(const std::string& s) {
     return Charset::Latin1;
 }
 
-std::u32string utf8_decode(const std::string& s) {
+static std::u32string utf8_decode(const std::string& s) {
     std::u32string out;
     for (size_t i = 0; i < s.size();) {
         unsigned char c = s[i];

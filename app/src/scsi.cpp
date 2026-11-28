@@ -11,10 +11,6 @@ ScsiDisk::ScsiDisk(FatVolume& vol, std::string vendor, std::string product, std:
     : vol_(vol), vendor_(std::move(vendor)), product_(std::move(product)),
       serial_(std::move(serial)), read_only_(read_only) {}
 
-bool ScsiDisk::carries_data_out(uint8_t op) {
-    return op == 0x0A || op == 0x2A || op == 0xAA || op == 0x8A || op == 0x15 || op == 0x55;
-}
-
 ScsiDisk::Status ScsiDisk::fail(uint8_t key, uint8_t asc, uint8_t ascq) {
     sense_key_ = key;
     asc_ = asc;
@@ -48,8 +44,6 @@ ScsiDisk::Status ScsiDisk::read(const uint8_t* cdb, Bytes& out) {
     rw_params(cdb, lba, count);
     if (lba + count > vol_.total_sectors()) return fail(kIllegalRequest, 0x21);
     if (lba == 0 && on_mount) on_mount();
-    reads++;
-    sectors_read += count;
     out.resize(size_t(count) * kSector);
     if (count) vol_.read(lba, count, out.data());
     return kGood;
@@ -174,7 +168,6 @@ bool BulkOnly::serve_one() {
     bool dir_in = cbw[12] & 0x80;
     uint8_t lun = cbw[13];
     const uint8_t* cdb = cbw + 15;
-    commands++;
 
     data_out_.clear();
     if (length && !dir_in) {

@@ -15,10 +15,8 @@ public:
 
     // Runs one command. data_out carries a write's data; the reply data goes to data_in.
     Status execute(const uint8_t* cdb, const Bytes& data_out, Bytes& data_in);
-    static bool carries_data_out(uint8_t op);
 
     std::function<void()> on_mount;     // the host read LBA 0
-    uint64_t reads = 0, sectors_read = 0;
 
 private:
     Status fail(uint8_t key, uint8_t asc, uint8_t ascq = 0);
@@ -45,7 +43,6 @@ public:
     BulkOnly(ScsiDisk& disk, BulkTransport& t) : disk_(disk), t_(t) {}
     // Serves one CBW/data/CSW exchange. False when the transport failed (host gone).
     bool serve_one();
-    uint64_t commands = 0;
 
 private:
     ScsiDisk& disk_;

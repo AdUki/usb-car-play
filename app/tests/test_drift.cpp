@@ -39,9 +39,9 @@ void test_resampler() {
                 resampler_snr(1000, 1.0), resampler_snr(1000, 1 + 800e-6),
                 resampler_snr(12000, 1 + 300e-6), resampler_snr(17000, 1 - 300e-6));
     CHECK(resampler_snr(1000, 1.0, &frames) > 75);
-    CHECK(std::abs(long(frames) - long(2 * 44100 - Resampler::kTaps / 2)) <= 1);
+    CHECK(std::abs(long(frames) - long(2 * 44100 - Resampler::delay_frames())) <= 1);
     CHECK(resampler_snr(1000, 1 + 800e-6, &frames) > 75);
-    CHECK(std::abs(double(frames) - 2 * 44100 * (1 + 800e-6)) < Resampler::kTaps);
+    CHECK(std::abs(double(frames) - 2 * 44100 * (1 + 800e-6)) < 2 * Resampler::delay_frames());
     CHECK(resampler_snr(1000, 1 - 800e-6) > 75);
     CHECK(resampler_snr(12000, 1 + 300e-6) > 75);
     CHECK(resampler_snr(17000, 1 - 300e-6) > 75);
