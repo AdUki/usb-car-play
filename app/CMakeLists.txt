@@ -35,13 +35,13 @@ add_library(btdisk_core STATIC
   src/config.cpp
   src/drift.cpp
   src/fat.cpp
-  src/ffs.cpp
   src/formats.cpp
   src/livefile.cpp
   src/log.cpp
   src/player.cpp
   src/scsi.cpp
-  src/stream.cpp)
+  src/stream.cpp
+  src/usb_disk.cpp)
 target_include_directories(btdisk_core PUBLIC src)
 target_compile_definitions(btdisk_core PRIVATE BTDISK_VERSION="${BTDISK_VERSION}")
 target_link_libraries(btdisk_core PUBLIC PkgConfig::SYSTEMD PkgConfig::SBC Threads::Threads)

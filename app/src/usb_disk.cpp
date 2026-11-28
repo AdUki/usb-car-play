@@ -1,12 +1,64 @@
-#include "ffs.h"
+#include "usb_disk.h"
 
 #include <cerrno>
+#include <csignal>
 #include <cstring>
+#include <dirent.h>
 #include <fcntl.h>
+#include <fstream>
 #include <linux/usb/ch9.h>
 #include <linux/usb/functionfs.h>
 #include <stdexcept>
 #include <unistd.h>
+
+// ------------------------------------------------------------------------- Bulk-Only
+
+bool BulkOnly::serve_one() {
+    uint8_t cbw[512];
+    ssize_t n = t_.read_out(cbw, sizeof cbw);
+    if (n < 0) return false;
+    if (n != 31 || get_le32(cbw) != 0x43425355 || cbw[14] < 1 || cbw[14] > 16) {
+        LOGW("invalid CBW (%zd bytes)", n);
+        t_.halt();
+        return true;
+    }
+    uint32_t tag = get_le32(cbw + 4), length = get_le32(cbw + 8);
+    bool dir_in = cbw[12] & 0x80;
+    uint8_t lun = cbw[13];
+    const uint8_t* cdb = cbw + 15;
+
+    data_out_.clear();
+    if (length && !dir_in) {
+        data_out_.resize(length);
+        size_t got = 0;
+        while (got < length) {
+            ssize_t r = t_.read_out(data_out_.data() + got, length - got);
+            if (r <= 0) return false;
+            got += r;
+        }
+    }
+    ScsiDisk::Status st = lun == 0 ? disk_.execute(cdb, data_out_, data_in_)
+                                   : ScsiDisk::kCheckCondition;
+    if (lun != 0) data_in_.clear();
+    uint32_t residue = 0;
+    if (dir_in && length) {
+        // Short replies are padded rather than stalled (BOT 6.7.2 allows either for Hi > Di;
+        // some hosts handle the stall badly).
+        if (data_in_.size() < length) {
+            residue = length - data_in_.size();
+            data_in_.resize(length, 0);
+        }
+        if (!t_.write_in(data_in_.data(), length)) return false;
+    }
+    uint8_t csw[13];
+    put_le32(csw, 0x53425355);
+    put_le32(csw + 4, tag);
+    put_le32(csw + 8, residue);
+    csw[12] = st == ScsiDisk::kGood ? 0 : 1;
+    return t_.write_in(csw, sizeof csw);
+}
+
+// ------------------------------------------------------------------------- FunctionFS
 
 namespace {
 
@@ -94,19 +146,65 @@ Strings make_strings() {
     return s;
 }
 
+
+std::string board_serial() {
+    // Mass storage wants a serial of at least 12 hex digits; the Pi's own is stable per board.
+    std::ifstream in("/proc/cpuinfo");
+    std::string line;
+    while (std::getline(in, line))
+        if (line.rfind("Serial", 0) == 0) {
+            std::string s = line.substr(line.find(':') + 1), out;
+            for (char c : s) if (isxdigit(uint8_t(c))) out.push_back(toupper(c));
+            if (out.size() >= 12) return out.substr(out.size() - 12);
+        }
+    return "B7D15C000001";
+}
+
+int g_udc_fd = -1;
+
+void unbind_and_exit(int) {
+    // Detach from the bus so the radio sees the stick go away cleanly.
+    if (g_udc_fd >= 0 && write(g_udc_fd, "\n", 1) < 0) {}
+    _exit(0);
+}
+
+void bind_udc(const std::string& gadget, std::string udc) {
+    if (udc == "auto") {
+        udc.clear();
+        if (DIR* d = opendir("/sys/class/udc")) {
+            while (dirent* e = readdir(d))
+                if (e->d_name[0] != '.' && udc.empty()) udc = e->d_name;
+            closedir(d);
+        }
+    }
+    if (udc.empty()) throw std::runtime_error("no USB device controller (is dwc2 in peripheral mode?)");
+    g_udc_fd = open((gadget + "/UDC").c_str(), O_WRONLY | O_CLOEXEC);
+    if (g_udc_fd < 0 || write(g_udc_fd, udc.c_str(), udc.size()) < 0)
+        throw std::runtime_error("binding " + gadget + " to " + udc + ": " + strerror(errno));
+    signal(SIGTERM, unbind_and_exit);
+    signal(SIGINT, unbind_and_exit);
+    LOGI("usb: bound to %s", udc.c_str());
+}
+
 }  // namespace
 
-FunctionFs::FunctionFs(std::string mountpoint, ScsiDisk& disk)
-    : mount_(std::move(mountpoint)), disk_(disk) {}
+UsbDisk::UsbDisk(FatVolume& vol, UsbDiskOptions opt)
+    : opt_(std::move(opt)),
+      disk_(vol, opt_.vendor, opt_.product, opt_.serial == "auto" ? board_serial() : opt_.serial,
+            opt_.read_only) {
+    disk_.on_mount = [this] {
+        if (on_mount) on_mount();
+    };
+}
 
-FunctionFs::~FunctionFs() {
+UsbDisk::~UsbDisk() {
     if (bot_.joinable()) bot_.detach();
     for (int fd : {ep_in_, ep_out_, ep0_}) if (fd >= 0) close(fd);
 }
 
-void FunctionFs::start() {
-    ep0_ = open((mount_ + "/ep0").c_str(), O_RDWR);
-    if (ep0_ < 0) throw std::runtime_error("open " + mount_ + "/ep0: " + strerror(errno));
+void UsbDisk::start() {
+    ep0_ = open((opt_.ffs + "/ep0").c_str(), O_RDWR);
+    if (ep0_ < 0) throw std::runtime_error("open " + opt_.ffs + "/ep0: " + strerror(errno));
     Descriptors d = make_descriptors();
     Strings s = make_strings();
     if (::write(ep0_, &d, sizeof d) != ssize_t(sizeof d))
@@ -114,14 +212,16 @@ void FunctionFs::start() {
     if (::write(ep0_, &s, sizeof s) != ssize_t(sizeof s))
         throw std::runtime_error(std::string("writing strings: ") + strerror(errno));
     // Endpoint files are numbered in descriptor order: ep1 is bulk IN, ep2 bulk OUT.
-    ep_in_ = open((mount_ + "/ep1").c_str(), O_RDWR);
-    ep_out_ = open((mount_ + "/ep2").c_str(), O_RDWR);
+    ep_in_ = open((opt_.ffs + "/ep1").c_str(), O_RDWR);
+    ep_out_ = open((opt_.ffs + "/ep2").c_str(), O_RDWR);
     if (ep_in_ < 0 || ep_out_ < 0) throw std::runtime_error("opening the bulk endpoints");
     bot_ = std::thread([this] { bot_loop(); });
-    LOGI("FunctionFS ready at %s", mount_.c_str());
+    LOGI("FunctionFS ready at %s", opt_.ffs.c_str());
+    // The descriptors are in: attach to the bus. The host sees the stick from here on.
+    if (!opt_.gadget.empty()) bind_udc(opt_.gadget, opt_.udc);
 }
 
-void FunctionFs::bot_loop() {
+void UsbDisk::bot_loop() {
     EpTransport t(ep_in_, ep_out_);
     BulkOnly bot(disk_, t);
     for (;;) {
@@ -137,7 +237,7 @@ void FunctionFs::bot_loop() {
     }
 }
 
-void FunctionFs::run_ep0() {
+void UsbDisk::run() {
     uint8_t buf[sizeof(usb_functionfs_event) * 4];
     for (;;) {
         ssize_t n = ::read(ep0_, buf, sizeof buf);
@@ -153,7 +253,7 @@ void FunctionFs::run_ep0() {
     }
 }
 
-void FunctionFs::event(const uint8_t* raw) {
+void UsbDisk::event(const uint8_t* raw) {
     usb_functionfs_event ev;
     memcpy(&ev, raw, sizeof ev);
     static const char* names[] = {"bind", "unbind", "enable", "disable", "setup", "suspend", "resume"};
@@ -177,7 +277,7 @@ void FunctionFs::event(const uint8_t* raw) {
             was = enabled_;
             if (ev.type != FUNCTIONFS_SUSPEND) enabled_ = false;
         }
-        if (was && on_disable) on_disable();
+        if (was && on_disconnect) on_disconnect();
         break;
     }
     case FUNCTIONFS_SETUP:
@@ -188,7 +288,7 @@ void FunctionFs::event(const uint8_t* raw) {
     }
 }
 
-void FunctionFs::setup(uint8_t type, uint8_t req, uint16_t length) {
+void UsbDisk::setup(uint8_t type, uint8_t req, uint16_t length) {
     uint8_t zero = 0;
     ssize_t r;
     if (type == 0xA1 && req == 0xFE) {            // GET MAX LUN: one LUN

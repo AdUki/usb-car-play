@@ -4,7 +4,7 @@
 #pragma once
 
 #include "fat.h"
-#include "scsi.h"
+#include "usb_disk.h"
 
 #include <cstring>
 #include <deque>

@@ -7,36 +7,20 @@
 #include "a2dp.h"
 #include "bluez.h"
 #include "config.h"
-#include "ffs.h"
 #include "player.h"
-#include "scsi.h"
 #include "stream.h"
+#include "usb_disk.h"
 
 #include <atomic>
 #include <cmath>
 #include <csignal>
 #include <cstring>
-#include <dirent.h>
 #include <fcntl.h>
-#include <fstream>
 #include <getopt.h>
 #include <memory>
 #include <unistd.h>
 
 namespace {
-
-std::string board_serial() {
-    // Mass storage wants a serial of at least 12 hex digits; the Pi's own is stable per board.
-    std::ifstream in("/proc/cpuinfo");
-    std::string line;
-    while (std::getline(in, line))
-        if (line.rfind("Serial", 0) == 0) {
-            std::string s = line.substr(line.find(':') + 1), out;
-            for (char c : s) if (isxdigit(uint8_t(c))) out.push_back(toupper(c));
-            if (out.size() >= 12) return out.substr(out.size() - 12);
-        }
-    return "B7D15C000001";
-}
 
 PlayerConfig player_config(const Config& c) {
     PlayerConfig p;
@@ -103,6 +87,18 @@ FatOptions fat_options(const Config& c, const PlayerConfig& pc) {
     return f;
 }
 
+UsbDiskOptions usb_options(const Config& c) {
+    UsbDiskOptions u;
+    u.ffs = c.str("usb.ffs", u.ffs);
+    u.gadget = c.str("usb.gadget", u.gadget);
+    u.udc = c.str("usb.udc", u.udc);
+    u.vendor = c.str("usb.vendor", u.vendor);
+    u.product = c.str("usb.product", u.product);
+    u.serial = c.str("usb.serial", u.serial);
+    u.read_only = c.flag("usb.read_only", u.read_only);
+    return u;
+}
+
 // A test sine instead of the phone, paced by the wall clock like a phone would be.
 void play_tone(LiveStream& stream, double hz, int rate, int channels) {
     double phase = 0, t0 = now_s();
@@ -164,38 +160,6 @@ int dump_image(FatVolume& vol, LiveStream& stream, const std::string& path) {
     done = true;
     feeder.join();
     return rc;
-}
-
-int g_udc_fd = -1;
-
-void unbind_and_exit(int) {
-    // Detach from the bus so the radio sees the stick go away cleanly.
-    if (g_udc_fd >= 0 && write(g_udc_fd, "\n", 1) < 0) {}
-    _exit(0);
-}
-
-bool bind_udc(const std::string& gadget, std::string udc) {
-    if (udc == "auto") {
-        udc.clear();
-        if (DIR* d = opendir("/sys/class/udc")) {
-            while (dirent* e = readdir(d))
-                if (e->d_name[0] != '.' && udc.empty()) udc = e->d_name;
-            closedir(d);
-        }
-    }
-    if (udc.empty()) {
-        LOGW("no USB device controller (is dwc2 in peripheral mode?)");
-        return false;
-    }
-    g_udc_fd = open((gadget + "/UDC").c_str(), O_WRONLY | O_CLOEXEC);
-    if (g_udc_fd < 0 || write(g_udc_fd, udc.c_str(), udc.size()) < 0) {
-        LOGW("binding %s to %s: %s", gadget.c_str(), udc.c_str(), strerror(errno));
-        return false;
-    }
-    signal(SIGTERM, unbind_and_exit);
-    signal(SIGINT, unbind_and_exit);
-    LOGI("usb: bound to %s", udc.c_str());
-    return true;
 }
 
 void usage() {
@@ -279,10 +243,11 @@ int main(int argc, char** argv) {
     stream.start();
     if (tone > 0) std::thread(play_tone, std::ref(stream), tone, pc.rate, pc.channels).detach();
 
-    std::string serial = cfg.str("usb.serial", "auto");
-    ScsiDisk disk(vol, cfg.str("usb.vendor", "Generic"), cfg.str("usb.product", "USB Flash Disk"),
-                  serial == "auto" ? board_serial() : serial, cfg.flag("usb.read_only", false));
-    disk.on_mount = [&] { player.on_mount(); };
+    UsbDiskOptions uo = usb_options(cfg);
+    if (!ffs_dir.empty()) uo.ffs = ffs_dir;
+    UsbDisk usb(vol, uo);
+    usb.on_mount = [&] { player.on_mount(); };
+    usb.on_disconnect = [&] { player.on_disconnect(); };
 
     std::thread([&] {
         for (int n = 1;; n++) {
@@ -303,18 +268,11 @@ int main(int argc, char** argv) {
     // USB first, Bluetooth after: the radio enumerates the stick while BlueZ is still coming up.
     if (bluez) bluez->start();
 
-    if (ffs_dir.empty()) ffs_dir = cfg.str("usb.ffs", "/dev/ffs-btdisk");
-    FunctionFs ffs(ffs_dir, disk);
-    ffs.on_disable = [&] { player.on_disconnect(); };
     try {
-        ffs.start();
+        usb.start();
     } catch (const std::exception& e) {
         LOGW("%s", e.what());
         return 1;
     }
-    // The descriptors are in: attach to the bus. The radio sees the stick from here on.
-    std::string gadget = cfg.str("usb.gadget", "/sys/kernel/config/usb_gadget/btdisk");
-    if (!gadget.empty() && !bind_udc(gadget, cfg.str("usb.udc", "auto"))) return 1;
-    ffs.run_ep0();
-    return 0;
+    usb.run();
 }

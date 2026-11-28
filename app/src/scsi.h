@@ -1,5 +1,5 @@
-// The SCSI commands a USB flash drive answers (the SBC subset radios and PCs send), and the
-// USB Mass Storage Bulk-Only Transport around them.
+// The SCSI commands a USB flash drive answers (the SBC subset radios and PCs send), on a FAT
+// volume. Nothing about USB: usb_disk.h carries the commands over the cable.
 #pragma once
 
 #include "fat.h"
@@ -28,24 +28,4 @@ private:
     std::string vendor_, product_, serial_;
     bool read_only_;
     uint8_t sense_key_ = 0, asc_ = 0, ascq_ = 0;
-};
-
-class BulkTransport {
-public:
-    virtual ~BulkTransport() = default;
-    virtual ssize_t read_out(uint8_t* buf, size_t n) = 0;          // host -> device
-    virtual bool write_in(const uint8_t* buf, size_t n) = 0;       // device -> host
-    virtual void halt() = 0;
-};
-
-class BulkOnly {
-public:
-    BulkOnly(ScsiDisk& disk, BulkTransport& t) : disk_(disk), t_(t) {}
-    // Serves one CBW/data/CSW exchange. False when the transport failed (host gone).
-    bool serve_one();
-
-private:
-    ScsiDisk& disk_;
-    BulkTransport& t_;
-    Bytes data_in_, data_out_;
 };
